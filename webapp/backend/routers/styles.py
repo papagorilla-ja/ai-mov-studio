@@ -1,0 +1,282 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from core.database import get_db
+from models.scenario import Scenario
+from models.scene import Scene
+from models.style_template import StyleTemplate
+from models.video import Video
+from models.video_style import VideoStyle
+from schemas.style import (
+    ApplyPromptRequest,
+    GenerateBgmPromptResponse,
+    StyleTemplateRead,
+    VideoStyleRead,
+    VideoStyleUpdate,
+)
+from services.design_tokens import (
+    STYLE_OPTIONS,
+    build_theme_css,
+    normalize_decor,
+    normalize_font,
+    normalize_motif,
+    normalize_background_3d,
+    normalize_narration_length,
+    normalize_motion_character,
+    normalize_narration_speed,
+    normalize_transition,
+    normalize_type_scale,
+    stage_classes,
+)
+from layouts._registry import normalize_breadth
+from services.composition import scene_audio_seconds
+from services.llm_service import (
+    apply_style_prompt as apply_style_prompt_llm,
+    generate_bgm_prompt as generate_bgm_prompt_llm,
+)
+from routers.llm_errors import llm_error
+
+router = APIRouter(tags=["styles"])
+
+# 単純に代入してよいフィールド（値の妥当性を問わないもの）
+_PLAIN_FIELDS = (
+    "template_id",
+    "color_primary",
+    "color_secondary",
+    "color_accent",
+    "color_bg",
+    "color_text_primary",
+    "style_prompt",
+    "custom_css",
+    "default_speaker_id",   # null 送信でクリア可
+    "default_speaker_b_id",  # null 送信でクリア可
+    "bgm_volume",
+    "bgm_prompt",
+    "canvas_width",
+    "canvas_height",
+)
+
+# 保存前に許可された値へ丸めるフィールド。
+# 廃止したフォント名や、UI/LLM が送ってきた未知の値をここで吸収する。
+_NORMALIZED_FIELDS = {
+    "font_heading": normalize_font,
+    "font_body": normalize_font,
+    "background_motif": normalize_motif,
+    "decor_style": normalize_decor,
+    "type_scale": normalize_type_scale,
+    "transition": normalize_transition,
+    "layout_breadth": normalize_breadth,
+    "motion_character": normalize_motion_character,
+    "background_3d": normalize_background_3d,
+    "narration_length": normalize_narration_length,
+    "narration_speed": normalize_narration_speed,
+}
+
+# 上のうち、DB が NOT NULL のもの。null が送られてきても既定値へ丸める。
+# 他のフィールドは null を「クリア（既定値にフォールバック）」として NULL 保存
+# できるが、これらは NULL を入れると保存時に落ちる。
+_NOT_NULL_FIELDS = ("narration_speed",)
+
+
+def _apply_updates(style: VideoStyle, payload: VideoStyleUpdate) -> None:
+    """送信されたフィールドだけを VideoStyle に反映する。
+
+    model_fields_set を見ることで「未送信」と「null を明示送信（クリア）」を
+    区別している。null を送って既定話者をクリアする操作があるため区別は必須。
+    """
+    sent = payload.model_fields_set
+    for field in _PLAIN_FIELDS:
+        if field in sent:
+            setattr(style, field, getattr(payload, field))
+    for field, normalize in _NORMALIZED_FIELDS.items():
+        if field in sent:
+            value = getattr(payload, field)
+            if value is None and field not in _NOT_NULL_FIELDS:
+                # 明示的な null はクリア（既定値にフォールバックさせる）とみなす
+                setattr(style, field, None)
+            else:
+                setattr(style, field, normalize(value))
+
+
+async def _get_or_create_style(video_id: str, db: AsyncSession) -> VideoStyle:
+    stmt = select(VideoStyle).where(VideoStyle.video_id == video_id)
+    style = (await db.execute(stmt)).scalars().first()
+    if not style:
+        style = VideoStyle(video_id=video_id)
+        db.add(style)
+        await db.flush()
+    return style
+
+
+def _to_response(style: VideoStyle) -> VideoStyleRead:
+    """保存済みの値に、プレビュー用の算出 CSS を添えて返す。
+
+    画面側は返ってきた theme_css を iframe に流し込むだけでよく、
+    派生色の計算を再実装せずに済む（再実装すると必ず本番のレンダリングとずれる）。
+    """
+    resp = VideoStyleRead.model_validate(style, from_attributes=True)
+    resp.theme_css = build_theme_css(
+        style, canvas_width=style.canvas_width, canvas_height=style.canvas_height
+    )
+    resp.stage_classes = stage_classes(style)
+    return resp
+
+
+@router.get("/style-options")
+async def get_style_options():
+    """背景モチーフ・装飾スタイル・組版・切替・フォントの選択肢を返す。
+
+    フロントエンドはこの結果だけを見て UI を組み立てる。
+    選択肢を画面側にも書くと必ず定義が二重化して片方が腐るため、
+    design_tokens.py を唯一の正としている。
+    """
+    return STYLE_OPTIONS
+
+
+@router.get("/style-templates", response_model=list[StyleTemplateRead])
+async def list_style_templates(db: AsyncSession = Depends(get_db)):
+    stmt = select(StyleTemplate)
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+@router.get("/videos/{video_id}/style", response_model=VideoStyleRead)
+async def get_video_style(video_id: str, db: AsyncSession = Depends(get_db)):
+    return _to_response(await _get_or_create_style(video_id, db))
+
+
+@router.patch("/videos/{video_id}/style", response_model=VideoStyleRead)
+async def update_video_style(video_id: str, payload: VideoStyleUpdate, db: AsyncSession = Depends(get_db)):
+    style = await _get_or_create_style(video_id, db)
+    _apply_updates(style, payload)
+    await db.flush()
+    return _to_response(style)
+
+
+@router.post("/videos/{video_id}/style/apply-template/{template_id}", response_model=VideoStyleRead)
+async def apply_style_template(video_id: str, template_id: str, db: AsyncSession = Depends(get_db)):
+    """テンプレートの内容を動画のスタイルへ丸ごと写す。
+
+    配色・書体だけでなく背景モチーフや装飾スタイルまで運ぶ必要があるため、
+    フロントエンドで項目を1つずつ写す方式はやめてサーバー側に集約した。
+    項目が増えたときにコピー漏れが起きるのを防ぐ狙いもある。
+    """
+    tpl = (await db.execute(select(StyleTemplate).where(StyleTemplate.id == template_id))).scalars().first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="テンプレートが見つかりません")
+
+    style = await _get_or_create_style(video_id, db)
+    style.template_id = tpl.id
+    for field in (
+        "color_primary", "color_secondary", "color_accent", "color_bg", "color_text_primary",
+        "font_heading", "font_body", "background_motif", "decor_style", "type_scale", "transition",
+    ):
+        setattr(style, field, getattr(tpl, field))
+    await db.flush()
+    return _to_response(style)
+
+
+@router.post("/videos/{video_id}/style/apply-prompt", response_model=VideoStyleRead)
+async def apply_style_prompt(video_id: str, payload: ApplyPromptRequest, db: AsyncSession = Depends(get_db)):
+    style = await _get_or_create_style(video_id, db)
+
+    current_style_dict = {
+        "color_primary": style.color_primary,
+        "color_secondary": style.color_secondary,
+        "color_accent": style.color_accent,
+        "color_bg": style.color_bg,
+        "color_text_primary": style.color_text_primary,
+        "font_heading": style.font_heading,
+        "font_body": style.font_body,
+        "background_motif": style.background_motif,
+        "decor_style": style.decor_style,
+        "type_scale": style.type_scale,
+        "transition": style.transition,
+    }
+
+    try:
+        parsed = await apply_style_prompt_llm(current_style_dict, payload.prompt)
+    except (ValueError, RuntimeError) as e:
+        raise llm_error(e, "スタイルの AI 適用") from e
+
+    # LLM の出力は信用せず、色はそのまま・選択肢は必ず許可された値へ丸める
+    for field in ("color_primary", "color_secondary", "color_accent", "color_bg", "color_text_primary"):
+        if field in parsed:
+            setattr(style, field, parsed[field])
+    for field, normalize in _NORMALIZED_FIELDS.items():
+        if field in parsed:
+            setattr(style, field, normalize(parsed[field]))
+
+    style.style_prompt = payload.prompt
+    await db.flush()
+    return _to_response(style)
+
+
+@router.post("/videos/{video_id}/generate-bgm-prompt", response_model=GenerateBgmPromptResponse)
+async def generate_bgm_prompt(video_id: str, db: AsyncSession = Depends(get_db)):
+    """動画のシナリオ・シーン構成・想定尺・スタイルを理解し、BGM作成用プロンプトを生成する。"""
+    stmt_video = select(Video).where(Video.id == video_id)
+    video = (await db.execute(stmt_video)).scalars().first()
+    if not video:
+        raise HTTPException(status_code=404, detail="動画が見つかりません")
+
+    stmt_scenario = select(Scenario).where(Scenario.video_id == video_id)
+    scenario = (await db.execute(stmt_scenario)).scalars().first()
+
+    scenes = []
+    if scenario:
+        stmt_scenes = select(Scene).where(Scene.scenario_id == scenario.id).order_by(Scene.index)
+        scenes = (await db.execute(stmt_scenes)).scalars().all()
+
+    style = await _get_or_create_style(video_id, db)
+
+    scene_infos = []
+    total_dur_sec = 0.0
+    for s in scenes:
+        dur, _ = scene_audio_seconds(s, speed=style.narration_speed)
+        total_dur_sec += dur
+        scene_infos.append({
+            "index": s.index,
+            "title": s.title or "",
+            "summary": s.outline_summary or "",
+            "duration_sec": round(dur, 1),
+        })
+
+    # シーンが存在しない場合のフォールバック（例: 60秒）
+    if total_dur_sec <= 0:
+        total_dur_sec = 60.0
+
+    style_info = {
+        "background_motif": style.background_motif,
+        "motion_character": style.motion_character,
+        "decor_style": style.decor_style,
+    }
+
+    scenario_summary = ""
+    if scenario and scenario.source_content:
+        scenario_summary = scenario.source_content[:500]
+
+    try:
+        result = await generate_bgm_prompt_llm(
+            video_title=video.name or "",
+            scenario_summary=scenario_summary,
+            scenes=scene_infos,
+            total_duration_sec=total_dur_sec,
+            style_info=style_info,
+        )
+    except (ValueError, RuntimeError) as e:
+        raise llm_error(e, "BGM プロンプトの生成") from e
+
+    if not result.get("bgm_prompt"):
+        raise HTTPException(status_code=502, detail="BGMプロンプトの生成に失敗しました")
+
+    style.bgm_prompt = result["bgm_prompt"]
+    await db.flush()
+
+    return GenerateBgmPromptResponse(
+        bgm_prompt=result["bgm_prompt"],
+        description=result.get("description"),
+        recommended_duration=result.get("recommended_duration"),
+        style=_to_response(style),
+    )

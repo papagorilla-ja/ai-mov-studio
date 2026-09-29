@@ -1,0 +1,37 @@
+{# 位置決めの wrapper（.diagram-node）と、アニメーションする要素（.clip）を分ける。
+   GSAP は transform を丸ごと書き換えるため、CSS の translate(-50%,-50%) が
+   載った要素をそのまま animate すると、中央寄せが消えて図形からずれた場所へ飛ぶ。 #}
+{% include "_partials/head.html" %}
+<div class="slide-body-area">
+  <div class="diagram-stage pyramid-stage" data-count="{{ count }}">
+    {# 背景は塗りだけの台形。preserveAspectRatio="none" で箱に合わせて引き伸ばす。
+
+       帯そのものを下の段から立ち上げる。土台から積み上がる動きが
+       このレイアウトで一番伝えたいことなので、文字だけ動かしても意味が伝わらない。
+       登場スロットは rows 側と同じ式（逆順）にすること。ずらすと帯と文字が別の段で出る。
+       伸ばすのに clip-path を使うのは、台形を scaleY で潰すと斜辺の角度が変わり、
+       伸びている途中だけ隣の段と辺がつながらなくなるため。 #}
+    <svg class="diagram" viewBox="{{ viewbox }}" preserveAspectRatio="none">
+      {% for b in bands %}
+      <polygon class="clip dg-fill" points="{{ b['points'] }}"
+               style="--dg-alpha: {{ b['alpha'] }}"
+               data-seq="spread" data-seq-index="{{ bands|length - loop.index }}"
+               data-anim="draw-up"></polygon>
+      {% endfor %}
+    </svg>
+    {# rows は prepare が組み立てた「root ＋ children」。
+       登場は下の段から。土台から積み上がる動きにする。 #}
+    {% for it in rows %}
+    <div class="diagram-node pyramid-node"
+         style="top: {{ bands[loop.index0]['top_pct'] }}%; left: 50%;
+                width: {{ bands[loop.index0]['width_pct'] }}%">
+      <div class="clip pyramid-body"
+           data-seq="spread" data-seq-index="{{ rows|length - loop.index }}"
+           data-seq-offset="0.2" data-anim="pop">
+        {% if it['label'] %}<div class="pyramid-label">{{ it['label'] }}</div>{% endif %}
+        {% if it['text'] %}<p class="pyramid-text">{{ it['text'] }}</p>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>

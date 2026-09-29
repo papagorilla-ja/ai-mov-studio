@@ -1,0 +1,64 @@
+/* 枝を絶対配置で引くツリー。座標計算をしないので、文字の長さが変わってもずれない。
+   - .tree-branch-h    … 兄弟をつなぐ横線
+   - .tree-branch-v    … 横線からノードへ下ろす縦線
+   - .tree-branch-drop … 親から子の横線へ下ろす縦線
+   端の子は横線を半分だけ引いて、はみ出した枝が出ないようにする。
+
+   枝は擬似要素ではなく span。GSAP が擬似要素を掴めず、枝だけ
+   最初から描かれてしまうため（template.html 側の注記も参照）。
+
+   2 つの落とし穴に注意すること。
+   1. 中央寄せに transform を使わない。枝は .clip なので GSAP が transform を
+      握る。translateX(-50%) を書くと登場と同時に中央寄せが飛ぶ。
+      幅 2px の半分を margin-left: -1px で相殺する。
+   2. li の数えかたは :first-of-type / :only-of-type を使う。
+      ul の直下に .tree-branch-drop（span）が入るため、:only-child は
+      子が 1 つでも成立せず、横線を消す指定が効かなくなる。 */
+.tree-root, .tree-root ul {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; justify-content: center; align-items: flex-start;
+}
+.tree-root li {
+  position: relative;
+  padding: calc(46px * var(--gap-scale) * var(--gap-dens)) calc(8px * var(--gap-scale)) 0;
+  text-align: center;
+}
+.tree-branch-h,
+.tree-branch-v,
+.tree-branch-drop { position: absolute; background: var(--border-strong); }
+.tree-branch-h { top: 0; left: 0; right: 0; height: 2px; }
+.tree-branch-v,
+.tree-branch-drop {
+  top: 0; left: 50%; width: 2px; margin-left: -1px;
+  height: calc(46px * var(--gap-scale) * var(--gap-dens));
+}
+/* 根には上から来る枝が無い（template 側でそもそも出力していない） */
+.tree-root > li { padding-top: 0; }
+/* 端の子は横線を内側半分だけにする */
+.tree-root li:first-of-type > .tree-branch-h { left: 50%; }
+.tree-root li:last-of-type  > .tree-branch-h { right: 50%; }
+.tree-root li:only-of-type  > .tree-branch-h { display: none; }
+/* 親から下へ下ろす枝の基準になる箱 */
+.tree-root li > ul { position: relative; padding-top: calc(46px * var(--gap-scale) * var(--gap-dens)); }
+
+.tree-node {
+  display: inline-flex; flex-direction: column; gap: 2px;
+  padding: calc(18px * var(--gap-scale) * var(--dens)) calc(26px * var(--gap-scale));
+  border-radius: calc(var(--surface-radius) - 6px);
+  background: var(--surface-bg);
+  border: var(--surface-border);
+  backdrop-filter: var(--surface-blur);
+}
+/* 根だけ塗って「ここが全体」だと分かるようにする */
+.tree-node.is-root {
+  background: rgba(var(--color-primary-rgb), 0.20);
+  border: 1px solid rgba(var(--color-primary-rgb), 0.5);
+}
+.tree-label {
+  font-family: var(--font-heading); font-weight: 700;
+  font-size: var(--fs-item); color: var(--text-primary); line-height: 1.3;
+  /* 枝の幅はノードの幅で決まる。折り返すと枝の位置がずれて見えるため折り返さない。
+     長すぎる見出しは data-fit の実測縮小に任せる。 */
+  white-space: nowrap;
+}
+.tree-text { font-size: var(--fs-sub); color: var(--text-secondary); margin: 0; }

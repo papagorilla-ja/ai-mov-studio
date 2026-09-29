@@ -1,0 +1,631 @@
+"""デザインシステムの中核 — 選択肢の定義と CSS カスタムプロパティの生成。
+
+このモジュールが「唯一の正」となるように設計している。
+選択肢 (背景モチーフ・装飾スタイル・タイポスケール・トランジション・フォント) は
+ここだけで定義し、API・シード・LLM プロンプト・フロントエンドの全てが
+ここから配られた値を使う。定義が二重化すると必ず片方が腐るため。
+
+配色の考え方:
+  ユーザーが指定するのは「主要 5 色 + フォント 2 種」だけに留める。
+  文字の副色・境界線・カード地・影といった大量の派生色は、
+  背景色の明るさ (相対輝度) から自動的に導出する。
+  こうしないと「背景を白にしたら白文字で読めない」という破綻が必ず起きる。
+"""
+
+# ==========================================================================
+# 選択肢の定義
+# ==========================================================================
+
+# 背景モチーフ。値はそのまま CSS のクラス名 (motif-<value>) になる。
+BACKGROUND_MOTIFS = [
+    {"value": "grid", "label": "グリッド", "description": "細かい方眼。情報密度の高い資料に馴染む"},
+    {"value": "mesh", "label": "メッシュ", "description": "色玉をぼかして重ねた柔らかいグラデーション"},
+    {"value": "dots", "label": "ドット", "description": "等間隔の点。軽快で親しみやすい"},
+    {"value": "waves", "label": "ウェーブ", "description": "斜めの帯。動きと奥行きが出る"},
+    {"value": "noise", "label": "ノイズ", "description": "微細な粒状の質感。落ち着いた紙のような印象"},
+    {"value": "plain", "label": "無地", "description": "装飾なし。内容に集中させたいとき"},
+]
+
+# 3D 背景。値はそのまま bg3d.js のシーン ID になり、#stage の data-bg3d に載る。
+#
+# 既定は "none"。3D は H.264 の圧縮効率を下げるため、全動画に効かせる設定には
+# せず、使う動画で明示的に選ぶ方式にしている。
+#
+# 収録している 3 種はいずれも点と線だけで描き、塗りと階調を避けている。
+# 先行検証では陰影のある立体で 46 倍（370KB → 17.0MB）になったが、
+# 平坦な絵にすることで実測 1.7〜3.6 倍に収めた（6 秒・1920x1080・24fps）。
+#
+#   particles    2.0 倍   wave_mesh  3.6 倍   orbit_rings  1.7 倍
+#
+# 説明文の倍率は、動画を作り直す前に気づけるよう画面にも出している。
+BACKGROUND_3D = [
+    {"value": "none", "label": "使わない",
+     "description": "2D の背景モチーフだけを使う。ファイルサイズが最も小さい"},
+    {"value": "particles", "label": "粒子",
+     "description": "ゆっくり漂う点群。主張が弱く、どの配色にも馴染む（容量 約2倍）"},
+    {"value": "wave_mesh", "label": "波の格子",
+     "description": "緩やかに波打つ格子。奥行きが出て画面が締まる（容量 約3.6倍）"},
+    {"value": "orbit_rings", "label": "軌道リング",
+     "description": "傾いた輪がゆっくり回る。中心に視線を集めたいときに（容量 約1.7倍）"},
+]
+
+# 装飾スタイル (カードや枠の質感)。値は CSS のクラス名 (decor-<value>) になる。
+DECOR_STYLES = [
+    {"value": "glass", "label": "グラス", "description": "半透明＋ぼかし。奥行きのある現代的な印象"},
+    {"value": "flat", "label": "フラット", "description": "影も透過もない塗り。すっきりと軽い"},
+    {"value": "outline", "label": "アウトライン", "description": "線画中心。余白が生きる知的な印象"},
+    {"value": "solid", "label": "ソリッド", "description": "不透明＋強い影。要素が明確に浮き立つ"},
+]
+
+# タイポグラフィスケール。値は CSS のクラス名 (type-<value>) になる。
+TYPE_SCALES = [
+    {"value": "compact", "label": "密", "description": "文字を小さめに。情報量の多いスライド向け"},
+    {"value": "normal", "label": "標準", "description": "バランス重視の既定値"},
+    {"value": "relaxed", "label": "ゆったり", "description": "文字を大きく行間も広く。要点を絞ったスライド向け"},
+]
+
+# シーン切替トランジション。app.js が #stage の data-transition を読んで適用する。
+TRANSITIONS = [
+    {"value": "none", "label": "なし", "description": "瞬時に切り替わる。要素側のアニメーションのみ"},
+    {"value": "fade", "label": "フェード", "description": "背景を挟んで穏やかに入れ替わる"},
+    {"value": "slide", "label": "スライド", "description": "横方向に滑り込む。テンポが出る"},
+    {"value": "zoom", "label": "ズーム", "description": "奥から迫り出す。印象が強い"},
+    {"value": "wipe", "label": "ワイプ", "description": "下から拭うように現れる"},
+]
+
+# フォント。macOS に実在するものと、リポジトリに同梱した BIZ UDPGothic のみを扱う。
+# stack は実際に font-family へ書き出す文字列。日本語名も併記して解決漏れを防ぐ。
+FONT_CHOICES = [
+    {
+        "value": "BIZ UDPGothic",
+        "label": "BIZ UDPゴシック",
+        "description": "同梱。読みやすさに配慮したユニバーサルデザイン書体",
+        "stack": "'BIZ UDPGothic', 'Hiragino Sans', sans-serif",
+    },
+    {
+        "value": "Hiragino Sans",
+        "label": "ヒラギノ角ゴシック",
+        "description": "標準的なゴシック。癖がなく万能",
+        "stack": "'Hiragino Sans', 'ヒラギノ角ゴシック', 'BIZ UDPGothic', sans-serif",
+    },
+    {
+        "value": "Hiragino Mincho ProN",
+        "label": "ヒラギノ明朝",
+        "description": "明朝体。格調と信頼感を出したいとき",
+        "stack": "'Hiragino Mincho ProN', 'ヒラギノ明朝 ProN', serif",
+    },
+    {
+        "value": "Hiragino Maru Gothic ProN",
+        "label": "ヒラギノ丸ゴ",
+        "description": "丸ゴシック。柔らかく親しみやすい",
+        "stack": "'Hiragino Maru Gothic ProN', 'ヒラギノ丸ゴ ProN', sans-serif",
+    },
+    {
+        "value": "YuGothic",
+        "label": "游ゴシック体",
+        "description": "モダンで引き締まった印象。ビジネス資料向け",
+        "stack": "'YuGothic', '游ゴシック体', 'Hiragino Sans', sans-serif",
+    },
+    {
+        "value": "YuMincho",
+        "label": "游明朝体",
+        "description": "上品で線の細い明朝。文化・教養系の題材に",
+        "stack": "'YuMincho', '游明朝体', 'Hiragino Mincho ProN', serif",
+    },
+    {
+        "value": "Klee",
+        "label": "クレー",
+        "description": "手書き風の楷書。教育・研修の温かみを出す",
+        "stack": "'Klee', 'クレー', 'Hiragino Mincho ProN', serif",
+    },
+    {
+        "value": "Toppan Bunkyu Midashi Mincho",
+        "label": "凸版文久見出し明朝",
+        "description": "見出し専用の力強い明朝。タイトルに映える",
+        "stack": "'Toppan Bunkyu Midashi Mincho', '凸版文久見出し明朝', 'Hiragino Mincho ProN', serif",
+    },
+]
+
+# 動きの性格。動画 1 本の中で「動きの作法」を揃えるための唯一のつまみ。
+#
+# レイアウトごと・要素ごとにパラメータを開放しない理由:
+#   50 レイアウト × 各要素 × 複数パラメータをユーザーに委ねると、1 本の動画の中で
+#   動きの性格がバラバラになり、視聴者は毎シーン「この動画の作法」を学び直すことになる。
+#   レイアウトの幅（layout_breadth）を絞っているのと同じ考え方。
+#
+# duration_scale は「動きにかける時間の倍率」。1 より大きいほどゆっくりになる。
+# 登場・退場・シーン切替だけでなく、背景モチーフの周期と Ken Burns の寄りにも
+# 同じ倍率が掛かる（app.js が #stage の属性から読む）。
+#
+# ease は「自分で ease を宣言していない語彙」にだけ適用される既定値。
+# clip-path やぼかしを動かす語彙は back 系で行き過ぎると値が不正になるため、
+# app.js 側で自前の ease を持たせて性格の影響を受けないようにしている。
+MOTION_CHARACTERS = [
+    {"value": "calm", "label": "落ち着き",
+     "description": "ゆっくり動く。説明が主役で、映像に気を取られたくないとき",
+     "duration_scale": 1.35, "ease": "power2.out"},
+    {"value": "standard", "label": "標準",
+     "description": "研修動画で扱いやすい速さ。迷ったらこれ",
+     "duration_scale": 1.0, "ease": "power2.out"},
+    {"value": "lively", "label": "躍動",
+     "description": "速く、弾んで動く。提案資料や短い告知向け",
+     "duration_scale": 0.72, "ease": "back.out(1.7)"},
+]
+
+# 読み上げ速度。生成した音声に後から掛ける倍率で、値がそのまま ffmpeg の atempo になる。
+# 換算の根拠: 生成済み 67 シーンの実測で、等倍は中央値 5.96 文字/秒（約 358 字/分）。
+BASE_CHARS_PER_SEC = 5.96
+NARRATION_SPEEDS = [
+    {"value": 0.9, "label": "ゆっくり", "description": "約 5.4 文字/秒。専門用語が多い内容や、初学者向けに"},
+    {"value": 1.0, "label": "標準", "description": "約 6.0 文字/秒。ニュース番組と同じくらいの速さ"},
+    {"value": 1.1, "label": "やや速め", "description": "約 6.6 文字/秒。聞き取りやすさを保ちつつ短くなる"},
+    {"value": 1.2, "label": "速め", "description": "約 7.2 文字/秒。既知の内容の復習や、尺を詰めたいときに"},
+    {"value": 1.3, "label": "かなり速め", "description": "約 7.7 文字/秒。早口に感じる人もいる速さ"},
+]
+
+
+# ナレーションの長さ。LLM に渡す「目安の文字数」の元になる。
+#
+# 秒だけを持ち、文字数は BASE_CHARS_PER_SEC から必ず算出する。
+# 両方を書くと片方だけ直したときに食い違う。実際、直す前のプロンプトには
+# 「20〜35秒で読める300〜500文字程度」と固定で書かれていたが、
+# 5.96 文字/秒で換算すると 300〜500 文字は 50〜84 秒であり、2 倍以上ずれていた。
+#
+# 読み上げ速度（narration_speed）は合成後に ffmpeg で掛けるため、
+# ここは常に等倍基準でよい。速度で割ると「速くしたのに文章まで短くなる」
+# という二重適用になる。
+def _length_note(seconds: int, note: str) -> str:
+    return f"約 {seconds} 秒（約 {_chars_for_seconds(seconds)} 字）。{note}"
+
+
+def _chars_for_seconds(seconds: int) -> int:
+    """秒数から目安の文字数を出す。10 字単位に丸める（目安なので細かさは不要）。"""
+    return int(round(seconds * BASE_CHARS_PER_SEC / 10) * 10)
+
+
+NARRATION_LENGTHS = [
+    {"value": "short", "label": "短め", "seconds": 15,
+     "description": _length_note(15, "要点だけを伝える。テンポの良い動画に")},
+    {"value": "standard", "label": "標準", "seconds": 30,
+     "description": _length_note(30, "研修動画で扱いやすい長さ。迷ったらこれ")},
+    {"value": "long", "label": "やや長め", "seconds": 45,
+     "description": _length_note(45, "背景や理由まで説明したいときに")},
+    {"value": "extra_long", "label": "長め", "seconds": 60,
+     "description": _length_note(60, "1 シーンで込み入った話を扱うときに")},
+]
+
+# 既定値。「既存動画の見た目を変えない」ことを最優先に選んでいる。
+DEFAULTS = {
+    "color_primary": "#6366f1",
+    "color_secondary": "#8b5cf6",
+    "color_accent": "#22d3ee",
+    "color_bg": "#0f0f1a",
+    "color_text_primary": "#f8fafc",
+    "font_heading": "BIZ UDPGothic",
+    "font_body": "BIZ UDPGothic",
+    "background_motif": "grid",
+    "background_3d": "none",
+    "decor_style": "glass",
+    "type_scale": "normal",
+    "transition": "none",
+    "motion_character": "standard",
+    "narration_speed": 1.0,
+    "narration_length": "standard",
+}
+
+# 廃止したフォント名から現行の選択肢への読み替え。
+# 過去に保存された 'Noto Sans JP' 等は実体が存在しないため、必ずここで吸収する。
+LEGACY_FONT_ALIASES = {
+    "Noto Sans JP": "BIZ UDPGothic",
+    "Noto Serif JP": "Hiragino Mincho ProN",
+    "M PLUS Rounded 1c": "Hiragino Maru Gothic ProN",
+    "BIZ UDPGothic": "BIZ UDPGothic",
+    "Inter": "YuGothic",
+    "Roboto": "YuGothic",
+}
+
+_MOTIF_VALUES = {o["value"] for o in BACKGROUND_MOTIFS}
+_BG3D_VALUES = {o["value"] for o in BACKGROUND_3D}
+_DECOR_VALUES = {o["value"] for o in DECOR_STYLES}
+_TYPE_VALUES = {o["value"] for o in TYPE_SCALES}
+_TRANSITION_VALUES = {o["value"] for o in TRANSITIONS}
+_FONT_STACKS = {o["value"]: o["stack"] for o in FONT_CHOICES}
+_SPEED_VALUES = tuple(o["value"] for o in NARRATION_SPEEDS)
+_LENGTH_VALUES = {o["value"] for o in NARRATION_LENGTHS}
+_LENGTH_SECONDS = {o["value"]: o["seconds"] for o in NARRATION_LENGTHS}
+_MOTION_VALUES = {o["value"] for o in MOTION_CHARACTERS}
+_MOTION_BY_VALUE = {o["value"]: o for o in MOTION_CHARACTERS}
+
+# API / フロントエンドへまとめて渡すためのカタログ
+STYLE_OPTIONS = {
+    "background_motifs": BACKGROUND_MOTIFS,
+    "background_3d": BACKGROUND_3D,
+    "decor_styles": DECOR_STYLES,
+    "type_scales": TYPE_SCALES,
+    "transitions": TRANSITIONS,
+    # stack も渡す。画面側でフォント名をその書体自身で描いて見せるのに使う。
+    "fonts": FONT_CHOICES,
+    "narration_speeds": NARRATION_SPEEDS,
+    "narration_lengths": NARRATION_LENGTHS,
+    "motion_characters": MOTION_CHARACTERS,
+    "defaults": DEFAULTS,
+}
+
+
+# ==========================================================================
+# 値の正規化
+# ==========================================================================
+
+def normalize_choice(value: str | None, allowed: set[str], fallback: str) -> str:
+    """許可された選択肢に丸める。DB の NULL・古い値・LLM の出鱈目を一箇所で吸収する。"""
+    if value and value in allowed:
+        return value
+    return fallback
+
+
+def normalize_motion_character(value: str | None) -> str:
+    return normalize_choice(value, _MOTION_VALUES, DEFAULTS["motion_character"])
+
+
+def motion_character(style) -> dict:
+    """スタイルから動きの性格の定義（倍率と ease を含む）を引く。
+
+    app.js には倍率と ease を数値・文字列として渡す。
+    向こうに同じ表をもう 1 つ置くと必ず片方が腐るため、定義はここだけに持つ。
+    """
+    value = normalize_motion_character(getattr(style, "motion_character", None) if style else None)
+    return _MOTION_BY_VALUE[value]
+
+
+def normalize_narration_speed(value) -> float:
+    """読み上げ速度を許可された段階に丸める。
+
+    そのまま ffmpeg の atempo に渡す値なので、範囲外や数値でないものを
+    通すと音声処理そのものが落ちる。段階の中で一番近いものへ寄せる。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return DEFAULTS["narration_speed"]
+    return min(_SPEED_VALUES, key=lambda allowed: abs(allowed - v))
+
+
+def normalize_narration_length(value: str | None) -> str:
+    """ナレーションの長さを許可された段階に丸める。NULL は既定（標準）。"""
+    return normalize_choice(value, _LENGTH_VALUES, DEFAULTS["narration_length"])
+
+
+def narration_target_chars(value: str | None) -> int:
+    """プリセットから、LLM に渡す目安の文字数を返す。
+
+    あくまで目安。LLM は指示どおりの文字数を必ずしも書かないので、
+    外れても生成を失敗扱いにしないこと。実際の尺は合成後の
+    narration_audio_duration が正。
+    """
+    return _chars_for_seconds(_LENGTH_SECONDS[normalize_narration_length(value)])
+
+
+# 見積もりの下限。音声合成は空のナレーションにも 2 秒の無音を置くので揃える。
+MIN_ESTIMATED_NARRATION_SEC = 2.0
+
+
+def estimate_narration_seconds(text: str | None, speed=None) -> float:
+    """まだ合成していないナレーションの尺を、文字数と読み上げ速度から見積もる。
+
+    プレビューで音声の無いシーンに使う。以前は一律 10 秒の仮置きで、
+    8 シーン 1,362 字の動画が 84.8 秒と出て、実際の 240 秒と大きくずれた（#58）。
+    空白・改行は読み上げに効かないので数えない。
+    速度は合成後に atempo で掛ける倍率なので、ここでは割る（速いほど短い）。
+    """
+    chars = len("".join((text or "").split()))
+    seconds = chars / BASE_CHARS_PER_SEC / normalize_narration_speed(speed)
+    return max(MIN_ESTIMATED_NARRATION_SEC, seconds)
+
+
+def normalize_motif(value: str | None) -> str:
+    return normalize_choice(value, _MOTIF_VALUES, DEFAULTS["background_motif"])
+
+
+def normalize_background_3d(value: str | None) -> str:
+    """3D 背景の選択を許可された値に丸める。
+
+    未知の値を通すと bg3d.js が「未知の 3D 背景です」と警告して何も出さない。
+    黙って背景が消えるより、既定の "none" に寄せて 2D の背景を出す方が安全。
+    """
+    return normalize_choice(value, _BG3D_VALUES, DEFAULTS["background_3d"])
+
+
+def normalize_decor(value: str | None) -> str:
+    return normalize_choice(value, _DECOR_VALUES, DEFAULTS["decor_style"])
+
+
+def normalize_type_scale(value: str | None) -> str:
+    return normalize_choice(value, _TYPE_VALUES, DEFAULTS["type_scale"])
+
+
+def normalize_transition(value: str | None) -> str:
+    return normalize_choice(value, _TRANSITION_VALUES, DEFAULTS["transition"])
+
+
+def normalize_font(value: str | None, fallback: str = "BIZ UDPGothic") -> str:
+    """フォント名を現行の選択肢に丸める（廃止名のエイリアスも解決する）。"""
+    if not value:
+        return fallback
+    if value in _FONT_STACKS:
+        return value
+    return LEGACY_FONT_ALIASES.get(value, fallback)
+
+
+def font_stack(value: str | None) -> str:
+    """フォント名から font-family に書き出す文字列を得る。"""
+    return _FONT_STACKS[normalize_font(value)]
+
+
+# ==========================================================================
+# 色の計算
+# ==========================================================================
+
+def parse_hex(value: str | None, fallback: str) -> tuple[int, int, int]:
+    """#rgb / #rrggbb を (r, g, b) に変換する。壊れた値は fallback に落とす。"""
+    for candidate in (value, fallback):
+        if not candidate:
+            continue
+        text = candidate.strip().lstrip("#")
+        if len(text) == 3:
+            text = "".join(ch * 2 for ch in text)
+        if len(text) == 6:
+            try:
+                return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+            except ValueError:
+                continue
+    return (0, 0, 0)
+
+
+def to_hex(rgb: tuple[int, int, int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*(max(0, min(255, int(round(c)))) for c in rgb))
+
+
+def rgb_triplet(rgb: tuple[int, int, int]) -> str:
+    """rgba(var(--x-rgb), 0.3) の形で使えるよう "r, g, b" を返す。"""
+    return ", ".join(str(max(0, min(255, int(round(c))))) for c in rgb)
+
+
+def relative_luminance(rgb: tuple[int, int, int]) -> float:
+    """WCAG の相対輝度。0 (黒) 〜 1 (白)。"""
+    channels = []
+    for c in rgb:
+        srgb = c / 255.0
+        channels.append(srgb / 12.92 if srgb <= 0.04045 else ((srgb + 0.055) / 1.055) ** 2.4)
+    r, g, b = channels
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    """WCAG のコントラスト比。1.0 (同色) 〜 21.0 (黒と白)。"""
+    la, lb = relative_luminance(a), relative_luminance(b)
+    lighter, darker = max(la, lb), min(la, lb)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def mix(a: tuple[int, int, int], b: tuple[int, int, int], ratio: float) -> tuple[int, int, int]:
+    """a を b の方向へ ratio (0.0〜1.0) だけ寄せた色。"""
+    ratio = max(0.0, min(1.0, ratio))
+    return tuple(a[i] + (b[i] - a[i]) * ratio for i in range(3))
+
+
+_WHITE = (255, 255, 255)
+_BLACK = (17, 17, 17)
+
+# 文字として使う色に要求するコントラスト比。
+# WCAG AA の小さい文字の基準。大きい文字なら 3.0 で足りるが、
+# 密度ティア (--dens) や自動縮小で実寸は小さくなりうるため、
+# 一律に厳しい方を取る。
+TEXT_CONTRAST_TARGET = 4.5
+
+
+def ensure_contrast(fg: tuple[int, int, int], bg: tuple[int, int, int],
+                    target: float = TEXT_CONTRAST_TARGET) -> tuple[int, int, int]:
+    """fg が bg に対して target のコントラストを満たすまで、白か黒へ寄せた色を返す。
+
+    すでに満たしていれば **元の色をそのまま返す**。ユーザーが選んだ色を
+    必要もなく変えないため。既定の配色（accent #22d3ee / bg #0f0f1a）は
+    10.5:1 あるので、この関数を通しても見た目は一切変わらない。
+
+    寄せ先は白と黒の両方を試し、**寄せ幅が小さい方**（元の色に近い方）を採る。
+    背景が中間の明るさのときは白へ寄せても届かないことがあるため、
+    片方向だけで判断すると読めない色のまま通してしまう。
+    """
+    if contrast_ratio(fg, bg) >= target:
+        return fg
+
+    # 刻みは細かくする。粗いと「あと 0.01 足りない」色が大きく飛ぶ。
+    # 既定の secondary (#8b5cf6 / 4.49:1) は 20 刻みだと 4.85:1 まで
+    # 持ち上がって色が目に見えて変わったが、60 刻みなら必要な分だけで済む。
+    STEPS = 60
+    best: tuple[int, tuple[int, int, int]] | None = None
+    for toward in (_WHITE, _BLACK):
+        for i in range(1, STEPS + 1):
+            cand = mix(fg, toward, i / STEPS)
+            if contrast_ratio(cand, bg) >= target:
+                if best is None or i < best[0]:
+                    best = (i, cand)
+                break
+    if best is not None:
+        return best[1]
+
+    # 白でも黒でも届かない（背景が中間の明るさ）。一番ましな方を返す。
+    return max((_WHITE, _BLACK), key=lambda c: contrast_ratio(c, bg))
+
+
+# ==========================================================================
+# トークンの生成
+# ==========================================================================
+
+def build_theme_css(style, *, canvas_width: int, canvas_height: int) -> str:
+    """VideoStyle から :root の CSS カスタムプロパティ定義を組み立てる。
+
+    ここで生成した :root は「テンプレート CSS より後ろ」に連結すること。
+    先に置くとテンプレート側の :root（未注入時のフォールバック）に上書きされ、
+    ユーザーの設定が一切効かなくなる。
+    """
+    primary = parse_hex(getattr(style, "color_primary", None), DEFAULTS["color_primary"])
+    secondary = parse_hex(getattr(style, "color_secondary", None), DEFAULTS["color_secondary"])
+    accent = parse_hex(getattr(style, "color_accent", None), DEFAULTS["color_accent"])
+    bg = parse_hex(getattr(style, "color_bg", None), DEFAULTS["color_bg"])
+    text = parse_hex(getattr(style, "color_text_primary", None), DEFAULTS["color_text_primary"])
+
+    # 背景の明るさでテーマを決める。以降の派生色はすべてこの判定に従う。
+    is_light = relative_luminance(bg) > 0.5
+
+    # 文字色と背景色のコントラストが不足している組み合わせ（暗いテーマの文字色を
+    # 残したまま背景だけ白にした等）は、そのままだと本文が読めない。
+    # ユーザー指定を尊重しつつ、破綻している場合に限り安全な色へ差し替える。
+    if contrast_ratio(text, bg) < 3.0:
+        text = _BLACK if is_light else _WHITE
+
+    # アクセント色とセカンダリ色は、装飾（ドット・罫線・グラデーション）だけでなく
+    # 見出しラベルの **文字色** としても使われる（アイブロウ・表のヘッダ・
+    # タイムラインの時期など 30 箇所以上）。ユーザーが背景と近い色を選ぶと
+    # そこだけ読めなくなるが、text と違って今まで無検査だった。
+    #
+    # 装飾用の --color-accent はユーザー指定のまま残し、文字用に別のトークンを
+    # 出す。こうすればブランド色は装飾に保たれ、読めなさだけが直る。
+    #
+    # 既定の配色では accent (#22d3ee / 10.5:1) は無加工のまま通る。
+    # secondary (#8b5cf6) は 4.49:1 と基準を 0.01 だけ下回るため僅かに持ち上がる
+    # (#8d5ff6 / 4.61:1)。RGB 距離 3.3 で、目視では同じ色。
+    accent_text = ensure_contrast(accent, bg)
+    secondary_text = ensure_contrast(secondary, bg)
+
+    # 前景を背景側へ寄せて副次的な文字色を作る（明暗どちらでも自然に沈む）
+    text_secondary = mix(text, bg, 0.32)
+    text_muted = mix(text, bg, 0.55)
+
+    # カードなどの「一段持ち上がった面」。明るいテーマでは暗く、暗いテーマでは明るく。
+    elevated = mix(bg, _BLACK if is_light else _WHITE, 0.05 if is_light else 0.07)
+    elevated_strong = mix(bg, _BLACK if is_light else _WHITE, 0.10 if is_light else 0.14)
+
+    # 境界線・罫線・影は明暗で反転させる
+    if is_light:
+        border = "rgba(15, 23, 42, 0.12)"
+        border_strong = "rgba(15, 23, 42, 0.24)"
+        grid_line = "rgba(15, 23, 42, 0.05)"
+        surface_glass = f"rgba({rgb_triplet(_WHITE)}, 0.72)"
+        shadow_soft = "0 18px 40px -18px rgba(15, 23, 42, 0.22)"
+        shadow_strong = "0 26px 60px -20px rgba(15, 23, 42, 0.32)"
+    else:
+        border = "rgba(255, 255, 255, 0.09)"
+        border_strong = "rgba(255, 255, 255, 0.20)"
+        grid_line = "rgba(255, 255, 255, 0.025)"
+        surface_glass = f"rgba({rgb_triplet(elevated)}, 0.68)"
+        shadow_soft = "0 18px 40px -18px rgba(0, 0, 0, 0.55)"
+        shadow_strong = "0 26px 60px -20px rgba(0, 0, 0, 0.70)"
+
+    # 主要色の上に乗せる文字色（バッジやボタンの中身）
+    on_primary = to_hex(_BLACK if relative_luminance(primary) > 0.55 else _WHITE)
+    on_accent = to_hex(_BLACK if relative_luminance(accent) > 0.55 else _WHITE)
+
+    # 見出しのグラデーション。文字色からアクセント寄りへ滑らかに振る。
+    title_from = to_hex(text)
+    title_to = to_hex(mix(text, accent, 0.45))
+    section_to = to_hex(mix(text, accent, 0.85))
+
+    # full_image レイアウトのタイトルを読ませるための覆い（常に背景色ベース）
+    overlay_rgb = rgb_triplet(bg)
+
+    heading_stack = font_stack(getattr(style, "font_heading", None))
+    body_stack = font_stack(getattr(style, "font_body", None))
+
+    return f""":root {{
+  /* ---- ユーザー指定色 ---- */
+  --color-primary: {to_hex(primary)};
+  --color-secondary: {to_hex(secondary)};
+  --color-accent: {to_hex(accent)};
+  --color-primary-rgb: {rgb_triplet(primary)};
+  --color-secondary-rgb: {rgb_triplet(secondary)};
+  --color-accent-rgb: {rgb_triplet(accent)};
+  --color-primary-glow: rgba({rgb_triplet(primary)}, 0.16);
+  --color-accent-glow: rgba({rgb_triplet(accent)}, 0.14);
+  /* 文字として載せるとき用。背景とのコントラストが足りなければ白か黒へ寄せた色。
+     足りていればユーザー指定そのまま。装飾には --color-accent の方を使うこと。 */
+  --color-accent-text: {to_hex(accent_text)};
+  --color-secondary-text: {to_hex(secondary_text)};
+  --on-primary: {on_primary};
+  --on-accent: {on_accent};
+
+  /* ---- 背景と面 ---- */
+  --bg-main: {to_hex(bg)};
+  --bg-main-rgb: {overlay_rgb};
+  --bg-elevated: {to_hex(elevated)};
+  --bg-elevated-strong: {to_hex(elevated_strong)};
+  --surface-glass: {surface_glass};
+
+  /* ---- 文字 ---- */
+  --text-primary: {to_hex(text)};
+  --text-secondary: {to_hex(text_secondary)};
+  --text-muted: {to_hex(text_muted)};
+  --title-grad-from: {title_from};
+  --title-grad-to: {title_to};
+  --section-grad-to: {section_to};
+
+  /* ---- 罫線と影 ---- */
+  --border-glass: {border};
+  --border-glass-hover: {border_strong};
+  --border-strong: {border_strong};
+  --grid-line: {grid_line};
+  --shadow-soft: {shadow_soft};
+  --shadow-strong: {shadow_strong};
+
+  /* ---- 書体 ---- */
+  --font-heading: {heading_stack};
+  --font-body: {body_stack};
+
+  /* ---- キャンバス ---- */
+  --canvas-width: {canvas_width}px;
+  --canvas-height: {canvas_height}px;
+}}
+"""
+
+
+def chart_palette(style) -> dict:
+    """Chart.js に渡す配色を組み立てる。
+
+    Chart.js は canvas に描くため CSS 変数が使えず、確定した色を JS 側へ
+    埋め込む必要がある。グラフだけ配色から浮かないよう、ここでも
+    ユーザー指定色から系列色・目盛り色・凡例色を導出する。
+    """
+    primary = parse_hex(getattr(style, "color_primary", None), DEFAULTS["color_primary"])
+    secondary = parse_hex(getattr(style, "color_secondary", None), DEFAULTS["color_secondary"])
+    accent = parse_hex(getattr(style, "color_accent", None), DEFAULTS["color_accent"])
+    bg = parse_hex(getattr(style, "color_bg", None), DEFAULTS["color_bg"])
+    text = parse_hex(getattr(style, "color_text_primary", None), DEFAULTS["color_text_primary"])
+
+    is_light = relative_luminance(bg) > 0.5
+    if contrast_ratio(text, bg) < 3.0:
+        text = _BLACK if is_light else _WHITE
+
+    # 主要3色に加え、その中間色を挟んで6系列ぶんを作る。
+    # 系列数がこれを超える場合は Chart.js 側で循環利用される。
+    series = [
+        primary,
+        accent,
+        secondary,
+        mix(primary, accent, 0.5),
+        mix(accent, secondary, 0.5),
+        mix(secondary, primary, 0.5),
+    ]
+    return {
+        "series": [to_hex(c) for c in series],
+        "border": to_hex(primary),
+        "tick": to_hex(mix(text, bg, 0.35)),
+        "legend": to_hex(text),
+        "grid": f"rgba({rgb_triplet(mix(text, bg, 0.65))}, 0.45)",
+    }
+
+
+def stage_classes(style) -> str:
+    """#stage に付与するデザイン系クラス（背景モチーフ・装飾・タイポ）を組み立てる。"""
+    motif = normalize_motif(getattr(style, "background_motif", None))
+    decor = normalize_decor(getattr(style, "decor_style", None))
+    scale = normalize_type_scale(getattr(style, "type_scale", None))
+    return f"motif-{motif} decor-{decor} type-{scale}"

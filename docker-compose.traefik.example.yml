@@ -1,0 +1,46 @@
+# =============================================================================
+# Traefik の後ろに置くときの上書きの見本（#119）
+#
+# 使い方（どちらか）:
+#   A. このファイルを docker-compose.override.yml にコピーして書き換える（git 管理外）
+#        cp docker-compose.traefik.example.yml docker-compose.override.yml
+#   B. .env で、このファイルを重ねるよう指定する
+#        COMPOSE_FILE=docker-compose.yml:docker-compose.traefik.example.yml
+#
+# .env に書くもの:
+#   APP_HOST=movgen.example.com   … Traefik で受けるホスト名（必須）
+#   APP_URL=https://movgen.example.com
+#                                 … start.sh が最後に表示する URL（任意）
+#   TRAEFIK_NETWORK=traefik       … Traefik がつながっている外部ネットワーク（既定: traefik）
+#   TRAEFIK_ENTRYPOINT=web        … Traefik のエントリーポイント（既定: web）
+#
+# ★ 注意: このアプリにはログイン機能がありません。
+#    URL を知っている人は誰でも、動画の生成・削除や設定の変更ができます。
+#    自分だけが使う閉じたネットワークで使ってください。インターネットや共有の
+#    ネットワークに出すなら、Traefik 側で認証（basicAuth など）や IP 制限を掛けてください。
+# =============================================================================
+
+services:
+  webapp:
+    # ホストの 3000 番は開けない（Traefik 経由でだけ受ける）
+    ports: !reset []
+    networks:
+      - frontend
+      - traefik
+    labels:
+      - traefik.enable=true
+      # webapp は 2 つのネットワークにつながるので、Traefik から届く方を指定する
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik}
+      - traefik.http.routers.ai-movgen.rule=Host(`${APP_HOST:?.env に APP_HOST を書いてください}`)
+      - traefik.http.routers.ai-movgen.entrypoints=${TRAEFIK_ENTRYPOINT:-web}
+      - traefik.http.services.ai-movgen.loadbalancer.server.port=80
+      # HTTPS にする場合（Traefik 側に証明書の仕組みがあるとき）は次の 2 行を有効にする
+      # - traefik.http.routers.ai-movgen.tls=true
+      # - traefik.http.routers.ai-movgen.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+
+  # api は外に出さない（webapp の nginx が /api と /ws を api へ中継する）
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}

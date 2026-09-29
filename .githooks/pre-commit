@@ -1,0 +1,7 @@
+#!/bin/bash
+# コミットしようとしている内容に、手元の情報（絶対パス・メールアドレス・鍵など）が
+# 含まれていないかを調べる（#118）。見つかったらコミットを止める。
+#
+# 有効にするには、リポジトリで 1 回だけ次を実行する:
+#   git config core.hooksPath .githooks
+exec "$(git rev-parse --show-toplevel)/scripts/check_private_info.sh" --staged

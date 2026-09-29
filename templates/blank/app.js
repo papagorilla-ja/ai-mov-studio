@@ -1,0 +1,968 @@
+/**
+ * ==========================================================================
+ * HyperFrames Video Studio - Application Controller (GSAP Orchestrator)
+ *
+ * 表示モードは2種類:
+ *   - レンダリングモード（既定）… #stage だけを原寸で表示する。hyperframes が
+ *     window.__timelines からタイムラインを取り出してフレームを描画する。
+ *   - プレビューモード … index.html?preview=1 で開いたときだけ。
+ *     ダッシュボードUI（サイドバー・再生コントロール）を表示する。
+ * ==========================================================================
+ */
+
+  // クエリで明示されたときだけプレビュー扱いにする。
+  // 旧実装は UA に "Headless" を含むかで判定していたが、判定を外すと
+  // ダッシュボードUIが映像に写り込むため、既定を安全側（レンダリング）にしている。
+  const query = new URLSearchParams(window.location.search);
+  const isPreviewMode = query.has("preview");
+  // bare … サイドバーや操作バーを隠し、ステージだけを枠いっぱいに出す。
+  //        アプリの生成進捗画面に iframe で埋め込むための表示。
+  // autoplay … 読み込みが済んだら 1 度だけ再生する。ループはしない
+  //        （レンダリングと同じマシンで回るため、CPU を使い続けない）。
+  const isBarePreview = isPreviewMode && query.has("bare");
+  const isAutoplay = isPreviewMode && query.has("autoplay");
+  // from / to … 再生する範囲（秒）。シーン詳細で「今のシーンだけ」を見せるのに使う（#82）。
+  // loop     … to に達したら from に戻って繰り返す（モーダルを閉じるまで流し続けるため）。
+  //            無ければ to で止まる。
+  // プレビュー表示のときだけ効く。動画の書き出し（レンダリング）には関係しない。
+  const playRange = (() => {
+    if (!isPreviewMode) return null;
+    const from = parseFloat(query.get("from"));
+    const to = parseFloat(query.get("to"));
+    if (!(from >= 0) || !(to > from)) return null;
+    return { from, to, loop: query.has("loop") };
+  })();
+
+  if (isPreviewMode) {
+    document.body.classList.add("preview-mode");
+    if (isBarePreview) {
+      document.body.classList.add("preview-bare");
+    } else {
+      // FontAwesome はダッシュボードのアイコンにしか使わないため、ここでだけ読み込む
+      // （レンダリングを外部ネットワークに依存させない）。
+      // bare ではアイコンを出さないので、読みにも行かない。
+      const faLink = document.createElement("link");
+      faLink.rel = "stylesheet";
+      faLink.href = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css";
+      document.head.appendChild(faLink);
+    }
+
+    // 下見では音を鳴らさない。
+    // 下見用のコンポジションは <audio> ごと削ってあるので普通は 0 件だが、
+    // 出力先をそのまま ?preview=1 で開くこともできる。そのときに
+    // 音が出ないことをここで保証しておく（404 任せにしない）。
+    document.querySelectorAll("audio").forEach((el) => {
+      el.muted = true;
+      el.autoplay = false;
+      el.pause();
+    });
+  }
+
+  // --- 1. GSAP Timeline Core Creation ---
+  const stage = document.getElementById("stage");
+  const totalDuration = parseFloat(stage.getAttribute("data-duration")) || 190;
+  // 音声が未合成のシーンを含むとき、全体の尺は文字数からの見積もりになる（#58）。
+  // 時間表示に「約」を付けて、実際の尺と違いうることを示す。
+  const durationEstimated = stage.getAttribute("data-duration-estimated") === "true";
+  const compositionId = stage.getAttribute("data-composition-id") || "composition";
+
+  // 動きの性格（落ち着き / 標準 / 躍動）。動画 1 本で「動きの作法」を揃えるための
+  // 唯一のつまみで、値は design_tokens.py が決めて #stage に書き出している。
+  // ここに同じ表を持たないこと（片方だけ直す事故が必ず起きる）。
+  //
+  // motionScale は「動きにかける時間の倍率」。1 より大きいほどゆっくりになる。
+  // 登場・退場・シーン切替だけでなく、背景モチーフの周期と Ken Burns にも掛ける。
+  // 属性が無い古いコンポジションでは 1.0 / power2.out となり、挙動は変わらない。
+  const motionScale = parseFloat(stage.getAttribute("data-motion-scale")) > 0
+    ? parseFloat(stage.getAttribute("data-motion-scale"))
+    : 1;
+  const motionEase = stage.getAttribute("data-motion-ease") || "power2.out";
+
+  // Create paused GSAP timeline
+  const tl = gsap.timeline({ paused: true });
+
+  // hyperframes はルート要素の data-composition-id をキーにタイムラインを探す。
+  // キーが一致しないとアニメーションが一切適用されず、中身が空の動画になる。
+  window.__timelines = window.__timelines || {};
+  window.__timelines[compositionId] = tl;
+  // 旧バージョン互換のフォールバック（__timelines を配列で上書きしないこと）
+  window.__timeline = tl;
+
+  // --- 2. 背景モチーフの動き ---
+  //
+  // 背景の 2 層（.stage-bg-motif / .stage-bg-glow）を、動画の尺いっぱいかけて
+  // ごくゆっくり動かす。静止した背景だと、本文が出入りするだけの平板な絵になる。
+  //
+  // CSS アニメーションは使わない。hyperframes はタイムラインを任意の時刻へ
+  // シークしてから 1 枚ずつ捕獲するため、実時間で進む CSS アニメーションは
+  // フレームごとに位相がばらつき、背景だけが不規則に震える動画になってしまう。
+  // GSAP のタイムラインに載せれば「時刻 → 見た目」が一意に決まる。
+  // （Chart.js を animation: false にしているのと同じ理由。）
+  //
+  // 速さは「言われないと気づかない」程度に留める。背景が目立つと本文と
+  // 注意を奪い合い、読み取りの邪魔になる。目安は 1 周 30 秒以上。
+  //
+  // 無限リピート（repeat: -1）は使わない。タイムラインの尺が Infinity になり、
+  // hyperframes が総尺を測れなくなるため。往復させたいものは回数を計算して渡す。
+
+  // 動きの速さ。いずれも「1 周期に何秒かけるか」で持つ。
+  // 尺で割った移動量にせず周期で持つのは、15 分の動画でも 1 分の動画でも
+  // 「見た目の速さ」を同じにするため。
+  //
+  // 当初はもっと遅く（方眼 1 タイル 40 秒など）していたが、実際の動画で
+  // 「動いていることに気づかない」ため約 3 倍に上げた。
+  // これ以上速くすると本文と注意を奪い合うので、上げるときは実物で確かめること。
+  const GRID_TILE_PX = 60;      // CSS の background-size と揃える
+  const GRID_CYCLE_SEC = 13;    // 方眼が 1 タイル進む秒数（約 4.6 px/s）
+  const WAVE_STRIPE_PX = 58;    // CSS の repeating-linear-gradient と揃える
+  const WAVE_CYCLE_SEC = 10;    // 縞が 1 本ぶん進む秒数（約 5.8 px/s）
+  const DOT_HALF_SEC = 4.5;     // 点の明滅の半周期
+  const MESH_HALF_SEC = 16;     // 色玉が片道を巡る秒数
+  const NOISE_HALF_SEC = 18;    // 光が片道ぶん広がる秒数
+
+  /** 模様を一定の速さで流す。1 周期の距離と秒数から総移動量を決める。 */
+  function addDrift(target, dx, dy, cycleSec, total) {
+    const k = total / (cycleSec * motionScale);
+    tl.fromTo(target,
+      { backgroundPosition: "0px 0px" },
+      {
+        backgroundPosition: `${(dx * k).toFixed(1)}px ${(dy * k).toFixed(1)}px`,
+        duration: total, ease: "none",
+      }, 0);
+  }
+
+  /**
+   * 動画の尺いっぱいを往復で埋める。
+   *
+   * 半周期を「尺を割り切れる値」へ丸めているのは、端数が出ると tween が
+   * 動画の尺をはみ出し、タイムラインの総尺が動画より長くなってしまうため。
+   */
+  function addOscillation(target, from, to, halfSec, total) {
+    const runs = Math.max(1, Math.round(total / (halfSec * motionScale)));
+    tl.fromTo(target, from, {
+      ...to, duration: total / runs, ease: "sine.inOut", repeat: runs - 1, yoyo: true,
+    }, 0);
+  }
+
+  const MOTIF_MOTIONS = {
+    // 方眼を斜めに流す。
+    grid: (motif, glow, total) =>
+      addDrift(motif, GRID_TILE_PX, GRID_TILE_PX, GRID_CYCLE_SEC, total),
+
+    // 色玉を巡回させる。玉は 1 枚の背景画像なので、層ごと回して動かす。
+    // 層は inset:-80px と blur(40px) で画面より大きいため、この程度の
+    // 回転・拡大では縁が入り込まない。角度を増やすときは縁が出ないか要確認。
+    mesh: (motif, glow, total) =>
+      addOscillation(motif, { rotation: -5, scale: 1.06 }, { rotation: 5, scale: 1.16 },
+                     MESH_HALF_SEC, total),
+
+    // 点の明滅。位置を動かすとタイルの継ぎ目が目に付くので、濃さだけ変える。
+    dots: (motif, glow, total) =>
+      addOscillation(motif, { opacity: 0.55 }, { opacity: 1 }, DOT_HALF_SEC, total),
+
+    // 斜めの帯を流す。
+    waves: (motif, glow, total) =>
+      addDrift(motif, WAVE_STRIPE_PX, -WAVE_STRIPE_PX, WAVE_CYCLE_SEC, total),
+
+    // 粒そのものは動かさない。1px 単位の粒がずれるとフレームごとにちらつき、
+    // 見づらいうえに動画の圧縮効率も落ちる。代わりに光の層だけ広げる。
+    noise: (motif, glow, total) =>
+      addOscillation(glow, { scale: 1, opacity: 0.7 }, { scale: 1.18, opacity: 1 },
+                     NOISE_HALF_SEC, total),
+
+    // 無地は何もしない。「内容に集中させたい」ときの選択肢なので動かさない。
+    plain: null,
+  };
+
+  function registerMotifMotion() {
+    const motif = document.querySelector(".stage-bg-motif");
+    const glow = document.querySelector(".stage-bg-glow");
+    if (!motif || !glow) return;
+
+    // モチーフの種類は #stage の motif-* クラスが持つ（design_tokens.py が付ける）。
+    const name = Array.from(stage.classList)
+      .find((c) => c.startsWith("motif-"))
+      ?.slice("motif-".length);
+    // 尺が取れないときは動かさない（0 秒の tween は GSAP が即座に完了扱いにする）
+    if (!(totalDuration > 0)) return;
+
+    const motion = name ? MOTIF_MOTIONS[name] : undefined;
+    if (motion === undefined) {
+      console.warn(`[motif] 未知の背景モチーフ "${name}" です。背景は静止のままにします`);
+      return;
+    }
+    if (motion) motion(motif, glow, totalDuration);
+  }
+
+  registerMotifMotion();
+
+  // --- 2.5 3D 背景 ---
+  //
+  // data-bg3d が付いている動画でだけ動く（既定は無し）。
+  // 3D は H.264 の圧縮効率を大きく下げるため、使う動画で明示的に選ぶ方式にしている。
+  //
+  // requestAnimationFrame は使わない。hyperframes はタイムラインを時刻 T へ
+  // seek してからフレームを捕獲するので、rAF で回すと捕獲クロックと同期せず
+  // コマ送りがちらつく。onUpdate から描くことで「時刻 → 絵」が一意に決まる。
+  const bg3dId = stage.getAttribute("data-bg3d");
+  if (bg3dId && window.__bg3d) {
+    const canvas = stage.querySelector(".stage-bg-3d");
+    if (canvas) {
+      const w = parseInt(stage.dataset.width || "1920", 10);
+      const h = parseInt(stage.dataset.height || "1080", 10);
+      // 線と点の色はテーマのアクセント色に合わせる。
+      // CSS 変数から採るので、配色を変えれば 3D 側も追従する。
+      const accent = getComputedStyle(stage).getPropertyValue("--color-accent").trim();
+      const bg3d = window.__bg3d.create(bg3dId, canvas, {
+        width: w, height: h,
+        color: accent || undefined,
+        // 動画ごとに配置を変えつつ、同じ動画では必ず同じにする
+        seedText: compositionId,
+      });
+      if (bg3d) {
+        // seek のたびに呼ばれる。ここで描くのが決定性の肝。
+        // eventCallback は上書きなので、既存の onUpdate があれば残して繋ぐ
+        // （今は誰も設定していないが、後から足したときに黙って消えないように）。
+        const prevOnUpdate = tl.eventCallback("onUpdate");
+        tl.eventCallback("onUpdate", function () {
+          if (prevOnUpdate) prevOnUpdate.apply(this, arguments);
+          bg3d.render(tl.time());
+        });
+        // 時刻 0 は onUpdate が発火しないことがあるので明示的に描く。
+        // キャンバスは #stage の実寸（1920x1080 等）で固定し、表示上の
+        // 拡大縮小は CSS 変形が行う。だから resize は要らない。
+        bg3d.render(0);
+      }
+    }
+  }
+
+  // --- 3. シーン切替トランジション ---
+  //
+  // シーン同士は時間軸上で重ならない（composition.py が尺を順に積むだけ）ため、
+  // 「持ち時間の中で退場を終え、次のシーンが登場する」方式で表現する。
+  // 切替の瞬間に見えるのはステージの背景モチーフで、黒画面にはならない。
+  //
+  // 既定は "none"（従来どおり瞬時に切り替わる）。data-transition が未設定の
+  // 古いコンポジションでも挙動が一切変わらないようにしている。
+
+  // from / to / out は同じプロパティ集合で書くこと。片方にしか無いプロパティを
+  // 混ぜると、GSAP が未設定の初期値から補間を始めて予期しない動きになる。
+  const SLIDE_TRANSITIONS = {
+    fade: {
+      duration: 0.45,
+      from: { opacity: 0 },
+      to: { opacity: 1 },
+      out: { opacity: 0 },
+    },
+    slide: {
+      duration: 0.5,
+      from: { opacity: 0, xPercent: 5 },
+      to: { opacity: 1, xPercent: 0 },
+      out: { opacity: 0, xPercent: -5 },
+    },
+    zoom: {
+      duration: 0.5,
+      from: { opacity: 0, scale: 1.06 },
+      to: { opacity: 1, scale: 1 },
+      out: { opacity: 0, scale: 0.97 },
+    },
+    wipe: {
+      duration: 0.55,
+      from: { opacity: 0, clipPath: "inset(100% 0% 0% 0%)" },
+      to: { opacity: 1, clipPath: "inset(0% 0% 0% 0%)" },
+      out: { opacity: 0, clipPath: "inset(0% 0% 100% 0%)" },
+    },
+  };
+
+  const transitionName = stage.getAttribute("data-transition") || "none";
+  const transition = SLIDE_TRANSITIONS[transitionName] || null;
+  // 切替も動きの性格に従わせる。ここだけ速さが変わらないと、
+  // シーンの中身と切替でテンポがちぐはぐになる。
+  const transitionSec = transition ? transition.duration * motionScale : 0;
+
+  /**
+   * スライド1枚ぶんの表示・非表示をタイムラインに登録する。
+   * transition が null のときは従来どおり set による瞬時切替。
+   */
+  function registerSlideVisibility(el, start, duration) {
+    gsap.set(el, { display: "none", opacity: 0, pointerEvents: "none" });
+
+    if (!transition) {
+      tl.set(el, { display: "flex", opacity: 1, pointerEvents: "auto" }, start);
+      tl.set(el, { display: "none", opacity: 0, pointerEvents: "none" }, start + duration);
+      return;
+    }
+
+    // 登場：表示状態にしてから from の値でアニメーションさせる
+    const inDuration = Math.min(transitionSec, duration / 2);
+    tl.set(el, { display: "flex", pointerEvents: "auto" }, start);
+    tl.fromTo(
+      el,
+      transition.from,
+      { ...transition.to, duration: inDuration, ease: "power2.out" },
+      start
+    );
+
+    // 退場：持ち時間の内側で必ず完了させる（次のシーンと重ねない）
+    const outDuration = Math.min(0.35 * motionScale, duration / 3);
+    tl.to(el, { ...transition.out, duration: outDuration, ease: "power2.in" }, start + duration - outDuration);
+    tl.set(el, { display: "none", opacity: 0, pointerEvents: "none" }, start + duration);
+  }
+
+  // --- 4. アニメーションの登録 ---
+  //
+  // 以前はクラス名（info-card / bullet-item / dialog-line …）で分岐していたが、
+  // レイアウトを 1 つ増やすたびにこのファイルへ if を足す必要があった。
+  // いまはレイアウト側が data-anim で「動きの語彙」を宣言し、ここは辞書を引くだけ。
+  // レイアウトを追加してもこのファイルは触らない。
+  //
+  // 語彙を増やすときは layouts/<id>/template.html 側の宣言とここの 2 箇所だけ。
+  //
+  // 語彙は 3 系統ある。**足す前に既存と重複していないか必ず確かめること。**
+  //   1. transform 系 … rise / slide-* / pop / expand-circle / flip
+  //        伸びる表現は grow-bar（下→上・scaleY）と scale-x（左→右・scaleX）の対。
+  //   2. clip-path 系 … draw-right(左→右) / draw-down(上→下) / draw-up(下→上)
+  //        transform を使わないので、角丸・グラデーション・線幅を歪めずに現れる。
+  //        帯・棒・線はこちらを使う。scaleX で伸ばすとグラデーションごと潰れる。
+  //        逆向きの draw-left は使う場所がまだ無いので置いていない。
+  //   3. 文字そのものを動かす … count-up
+  //        CSS プロパティの補間では表せないため、extra に関数を持たせている。
+  //
+  // ease を書いていない語彙には「動きの性格」の ease が入る（躍動なら back 系）。
+  // clip-path の inset とぼかしの px は行き過ぎると値が不正になり、
+  // そのフレームだけ描画が飛ぶため、該当する語彙には ease を明示して
+  // 性格の影響を受けないようにしてある。
+  const ANIMS = {
+    none:            { from: {},                                            to: {} },
+    fade:            { from: {},                                            to: { duration: 0.7 } },
+    rise:            { from: { y: 30 },                                     to: { y: 0, duration: 0.8 } },
+    "slide-right":   { from: { x: -40 },                                    to: { x: 0, duration: 0.7 } },
+    "slide-left":    { from: { x: 40 },                                     to: { x: 0, duration: 0.7 } },
+    pop:             { from: { scale: 0.9 },                                to: { scale: 1, duration: 0.65, ease: "back.out(1.5)" } },
+    "scale-x":       { from: { scaleX: 0 },                                 to: { scaleX: 1, duration: 0.7, transformOrigin: "left center" } },
+    // clip-path での「伸びる」表現。パスの長さを測らずに済み、
+    // 要素が CSS で回転していても、その向きに沿って伸びる。
+    "draw-right":    { from: { clipPath: "inset(0 100% 0 0)" },             to: { clipPath: "inset(0 0% 0 0)", duration: 0.6, ease: "power2.out" } },
+    "draw-down":     { from: { clipPath: "inset(0 0 100% 0)" },             to: { clipPath: "inset(0 0 0% 0)", duration: 0.6, ease: "power2.out" } },
+    "draw-up":       { from: { clipPath: "inset(100% 0 0 0)" },             to: { clipPath: "inset(0% 0 0 0)", duration: 0.6, ease: "power2.out" } },
+    "expand-circle": { from: { scale: 0.6 },                                to: { scale: 1, duration: 0.8, ease: "power3.out" } },
+    "grow-bar":      { from: { scaleY: 0 },                                 to: { scaleY: 1, duration: 0.7, transformOrigin: "center bottom" } },
+    "blur-in":       { from: { filter: "blur(14px)", scale: 1.04 },         to: { filter: "blur(0px)", scale: 1, duration: 0.9, ease: "power2.out" } },
+    // blur-in から scale を抜いたもの。data-motion で transform を使う要素に使う
+    // （両方が scale を書くと登場アニメーションが上書きされて消える）。
+    "soft-in":       { from: { filter: "blur(14px)" },                      to: { filter: "blur(0px)", duration: 0.9, ease: "power2.out" } },
+    flip:            { from: { rotationY: -70 },                            to: { rotationY: 0, duration: 0.7 } },
+    // 数値が主役のときだけ使う。軽く持ち上げつつ、数字を 0 から目標値まで動かす。
+    "count-up":      { from: { y: 18 },                                     to: { y: 0, duration: 0.5 }, extra: countUp },
+  };
+  const DEFAULT_ANIM = "rise";
+  // 退場は透明度だけにしている。位置や拡大を触ると、CSS 側で
+  // transform を持つ要素（図解のノードや回転した矢印）と取り合いになり、
+  // 最後の 0.4 秒だけ図が崩れる、という分かりにくい壊れ方をするため。
+  const EXIT_DURATION = 0.4;
+
+  // 退場の語彙。data-anim-out でレイアウト側が宣言する。未指定は fade（従来どおり）。
+  //
+  // 登場より控えめにしてあるのは、シーン切替のトランジション（data-transition）が
+  // 直後に重なるため。両方が派手だと終わり際がうるさくなる。
+  //
+  // transform を使う語彙は、下の「安全網」を通った要素にしか適用されない。
+  const EXITS = {
+    fade:         {},                    // 透明度だけ（既定）
+    sink:         { y: 20 },             // 下へ沈む（rise の逆）
+    "exit-left":  { x: -40 },            // 左へ抜ける（slide-right の逆）
+    "exit-right": { x: 40 },             // 右へ抜ける（slide-left の逆）
+    contract:     { scale: 0.92 },       // 縮んで消える（図解の収束）
+  };
+  // 上へ抜ける lift は、上から登場する語彙が無いため置いていない
+  // （draw-left を置いていないのと同じ理由）。
+  const DEFAULT_EXIT = "fade";
+
+  /**
+   * この要素で transform を伴う退場を許してよいか。
+   *
+   * 駄目なのは 2 つ。
+   *   1. data-motion を持つ要素 … Ken Burns が尺いっぱい transform を握っており、
+   *      退場でも触ると最後の 0.4 秒だけ毎フレーム取り合いになる
+   *   2. CSS 側で transform を持つ要素 … 中央寄せ（translate(-50%,-50%)）などが
+   *      入っている。退場で transform を書くとその指定が失われ、
+   *      最後の一瞬だけ位置が飛ぶという分かりにくい壊れ方をする
+   *
+   * 判定はこのループが要素へ触る前に行うこと。GSAP が transform を書いた後だと
+   * 2 の判定が常に真になってしまう（自分で書いた値を見てしまう）。
+   */
+  function canTransformOnExit(el) {
+    if (el.hasAttribute("data-motion")) return false;
+    return getComputedStyle(el).transform === "none";
+  }
+
+  // ---- count-up の実装 ----
+  //
+  // 「42.5%」「1,200 件」「約 3.2 倍」のように、数値の前後に文字が付く前提で書く。
+  // 最初に見つかった数値だけを 0 から目標値へ動かし、それ以外の文字は触らない。
+  //
+  // シーク方式の書き出しでも破綻しない。hyperframes はタイムラインを任意の時刻へ
+  // シークしてから 1 枚捕獲するが、GSAP はシーク先の時刻で tween を描画し直すため、
+  // onUpdate で書き戻す方式なら「時刻 → 表示」が一意に決まる。
+  // （Chart.js を animation: false にしたのは、あちらが rAF 駆動で
+  //   シークに追従しないため。GSAP の tween であればこの問題は起きない。）
+  const NUMBER_RE = /-?\d[\d,]*(?:\.\d+)?/;
+
+  // 実測オートフィットが途中経過（「0%」のような短い文字列）を測ってしまうと、
+  // 完成形が箱からはみ出す。測る直前に完成形へ戻せるよう控えておく。
+  const countUpTexts = [];
+
+  function restoreCountUpText() {
+    countUpTexts.forEach((item) => { item.el.textContent = item.text; });
+  }
+
+  function countUp(el, start, duration) {
+    const raw = el.textContent.trim();
+    const match = raw.match(NUMBER_RE);
+    if (!match) return;                       // 数字が無ければ持ち上げ（y）だけが効く
+    const target = parseFloat(match[0].replace(/,/g, ""));
+    if (!isFinite(target)) return;
+
+    const prefix = raw.slice(0, match.index);
+    const suffix = raw.slice(match.index + match[0].length);
+    // 小数桁と桁区切りは元の表記に合わせる。「3.2 倍」が途中で「3 倍」に見えたり、
+    // 「1,200」が「1200」に変わったりすると、別の値に読めてしまうため。
+    const decimals = (match[0].split(".")[1] || "").length;
+    const grouped = match[0].includes(",");
+    const format = (value) => {
+      const fixed = value.toFixed(decimals);
+      return grouped
+        ? Number(fixed).toLocaleString("ja-JP", {
+            minimumFractionDigits: decimals, maximumFractionDigits: decimals,
+          })
+        : fixed;
+    };
+
+    countUpTexts.push({ el: el, text: raw });
+
+    // 尺の長いシーンでも数え続けない。持ち時間の 35% を目安に 0.6〜1.6 秒へ収める。
+    const spin = Math.min(1.6, Math.max(0.6, duration * 0.35));
+    const proxy = { value: 0 };
+    tl.to(proxy, {
+      value: target,
+      duration: spin,
+      ease: "power2.out",
+      onUpdate: () => { el.textContent = prefix + format(proxy.value) + suffix; },
+    }, start);
+  }
+
+  const clips = document.querySelectorAll(".clip");
+
+  // Keep track of slide start/duration for navigation and stats
+  const slides = [];
+
+  clips.forEach((el) => {
+    const start = parseFloat(el.getAttribute("data-start"));
+    const duration = parseFloat(el.getAttribute("data-duration"));
+
+    if (isNaN(start) || isNaN(duration)) return;
+
+    if (el.classList.contains("slide")) {
+      // 1. Slide containers: display management + シーン切替トランジション
+      registerSlideVisibility(el, start, duration);
+
+      // Record slide details for preview controls
+      const indexAttr = el.getAttribute("id") || `slide-${slides.length + 1}`;
+      const title = el.querySelector(".slide-title")?.textContent ||
+                    el.querySelector(".section-title")?.textContent ||
+                    "Untitled Slide";
+      const badge = el.querySelector(".slide-eyebrow")?.textContent || "Section";
+
+      slides.push({
+        id: indexAttr,
+        index: slides.length + 1,
+        title: title,
+        category: badge,
+        start: start,
+        duration: duration,
+        element: el
+      });
+    } else {
+      // 2. スライド内の要素。data-anim の語彙で登場のしかたを決める。
+      const animName = el.getAttribute("data-anim");
+      // 辞書に無い語彙は既定へ落とすが、黙って落とすと気づけない。
+      // 実際 count-up は辞書に無いまま rise で描かれ続けており、
+      // 「数字が主役のレイアウトなのに数字が動かない」原因になっていた。
+      if (animName && !(animName in ANIMS)) {
+        console.warn(`[anim] 未定義の data-anim="${animName}" を既定 (${DEFAULT_ANIM}) で描画します`);
+      }
+      const spec = ANIMS[animName] || ANIMS[DEFAULT_ANIM];
+      const fromVars = Object.assign({ opacity: 0 }, spec.from);
+      // 既定の ease は「動きの性格」が決める。語彙が自分で ease を書いていれば
+      // そちらが勝つ（Object.assign の後勝ちで自然にそうなる）。
+      const toVars = Object.assign({ opacity: 1, ease: motionEase, duration: 0.7 }, spec.to);
+
+      // data-anim-duration で登場にかける秒数だけ上書きできる。
+      // 同じ動きでも、大きな面（グラフの canvas など）を既定の 0.6 秒で
+      // 開示すると一瞬で通り過ぎてしまう。速さ違いの語彙を増やすより、
+      // 使う側が秒数だけ指定できる方が語彙が散らからない。
+      const animSeconds = parseFloat(el.getAttribute("data-anim-duration"));
+      if (animSeconds > 0) toVars.duration = animSeconds;
+      // 最後に動きの性格の倍率を掛ける。語彙の既定・属性の上書きの
+      // どちらから来た秒数でも、動画全体で同じ比率で伸び縮みさせるため。
+      toVars.duration *= motionScale;
+
+      // 退場の指定を解決する。GSAP が transform を書く前に判定すること。
+      const outName = el.getAttribute("data-anim-out");
+      if (outName && !(outName in EXITS)) {
+        console.warn(`[anim] 未定義の data-anim-out="${outName}" を既定 (${DEFAULT_EXIT}) で描画します`);
+      }
+      let exitVars = EXITS[outName] || EXITS[DEFAULT_EXIT];
+      if (exitVars !== EXITS[DEFAULT_EXIT] && !canTransformOnExit(el)) {
+        // 安全網。宣言はあるが transform を動かせない要素なので透明度だけにする。
+        exitVars = EXITS[DEFAULT_EXIT];
+      }
+
+      gsap.set(el, { opacity: 0 });
+      tl.fromTo(el, fromVars, toVars, start);
+      // CSS プロパティの補間では表せない動き（数字のカウントなど）を足す。
+      if (spec.extra) spec.extra(el, start, duration);
+
+      const exitSec = EXIT_DURATION * motionScale;
+      const exitAt = Math.max(start, start + duration - exitSec);
+      // 退場も ease は power2.in で固定する。動きの性格の back 系 ease は
+      // 行き過ぎてから戻るため、消えていく要素に当てると不自然になる。
+      tl.to(el, { opacity: 0, ...exitVars, duration: exitSec, ease: "power2.in" }, exitAt);
+    }
+  });
+
+  // ---- 尺いっぱい続く動き（data-motion）----
+  //
+  // data-anim は「登場のしかた」で 0.7〜0.9 秒で終わる。実際のシーンは
+  // 48〜101 秒あり（生成済み動画の実測）、登場が終わったあとは完全な静止画になる。
+  // data-motion は、その要素が出ている間ずっと続く動きを宣言する。
+  //
+  // data-anim と同じ要素に付けてよいが、**同じプロパティを取り合わせないこと**。
+  // 画像は data-anim="soft-in"（ぼかしだけ）と data-motion="ken-burns"（transform だけ）
+  // の組み合わせにしている。両方が scale を書くと、後から描画される方に
+  // 上書きされて登場アニメーションが消える。
+  //
+  // 寄る量は「1 秒あたり何％」で持ち、上下限で挟む。背景モチーフと同じ考え方で、
+  // 固定量を尺いっぱいで割ると、長いシーンほど遅くなって気づかなくなるため。
+
+  const KEN_BURNS = {
+    // 写真向け。枠いっぱいに敷かれた画像（object-fit: cover）を想定していて、
+    // 寄っても切れるのは元から見えていない部分だけ。
+    photo: { rate: 0.003, min: 0.05, max: 0.14, pan: 0.02 },
+    // 図・画面キャプチャ向け。object-fit: contain なので寄ると端が欠ける。
+    // 欠ける量を片側 3% までに抑え、流し（pan）も入れない。
+    diagram: { rate: 0.0015, min: 0.03, max: 0.06, pan: 0 },
+  };
+
+  // 流す向き。既定は center（純粋な寄りだけ）。
+  // 文字を重ねるレイアウトで流すと、読ませたい部分が動いてしまうため。
+  const KEN_BURNS_DIRECTIONS = {
+    center: { x: 0, y: 0 },
+    tl: { x: -1, y: -1 }, tr: { x: 1, y: -1 },
+    bl: { x: -1, y: 1 }, br: { x: 1, y: 1 },
+  };
+
+  /**
+   * ゆっくり寄りながら、わずかに流す。
+   *
+   * pan は拡大による“のりしろ”（片側 zoom/2）より必ず小さくすること。
+   * 超えると、拡大が浅いうちに画像の外側が覗いてしまう。
+   *
+   * 動きの性格（motionScale）は rate・min・max・pan のすべてを同じだけ割る。
+   * 落ち着き（1.35）なら寄りが浅く遅く、躍動（0.72）なら深く速くなる。
+   * 4 つを揃って割るのが肝で、pan だけ据え置くと上の不変条件が崩れる
+   * （落ち着きで min が 0.037 まで下がると、のりしろ 1.85% に対して
+   *   pan 2% となり、画像の外側が覗く）。
+   */
+  function addKenBurns(el, start, duration, preset) {
+    const rate = preset.rate / motionScale;
+    const min = preset.min / motionScale;
+    const max = preset.max / motionScale;
+    const pan = preset.pan / motionScale;
+
+    const zoom = Math.min(max, Math.max(min, duration * rate));
+    const dir = KEN_BURNS_DIRECTIONS[el.getAttribute("data-motion-dir")] || KEN_BURNS_DIRECTIONS.center;
+    tl.fromTo(el,
+      { scale: 1, xPercent: 0, yPercent: 0 },
+      {
+        scale: 1 + zoom,
+        xPercent: dir.x * pan * 100,
+        yPercent: dir.y * pan * 100,
+        duration, ease: "none",
+      }, start);
+  }
+
+  const MOTIONS = {
+    "ken-burns": (el, start, duration) => addKenBurns(el, start, duration, KEN_BURNS.photo),
+    "ken-burns-soft": (el, start, duration) => addKenBurns(el, start, duration, KEN_BURNS.diagram),
+  };
+
+  document.querySelectorAll("[data-motion]").forEach((el) => {
+    const name = el.getAttribute("data-motion");
+    const motion = MOTIONS[name];
+    if (!motion) {
+      console.warn(`[motion] 未定義の data-motion="${name}" を無視します`);
+      return;
+    }
+    // 動く時間は、その要素を含む .clip の持ち時間に合わせる。
+    // 動かす要素自身が .clip とは限らない（ギャラリーは figure が .clip で、
+    // 動かすのはその中の img）。
+    const owner = el.closest(".clip[data-start]");
+    if (!owner) {
+      console.warn(`[motion] data-motion="${name}" の要素が .clip の中にありません`);
+      return;
+    }
+    const start = parseFloat(owner.getAttribute("data-start"));
+    const duration = parseFloat(owner.getAttribute("data-duration"));
+    if (isNaN(start) || isNaN(duration) || duration <= 0) return;
+    motion(el, start, duration);
+  });
+
+  // --- 5. 実測オートフィット（自動適応の第 3 層） ---
+  //
+  // 件数ごとの CSS 密度段階で大半は収まるが、「3 項目だが各 80 文字」のような
+  // 文字数の振れまでは予測できない。描画後に実測し、はみ出していれば縮小する。
+  //
+  // 縮めるのは data-fit を付けた「箱」であって .clip ではない。
+  // .clip の transform は GSAP が握っているため、そこへ scale を書くと
+  // 登場アニメーションに上書きされて効かない（または動きが壊れる）。
+  const MIN_FIT_SCALE = 0.62;
+
+  function fitBox(box) {
+    box.style.transform = "";
+    const availH = box.clientHeight;
+    const availW = box.clientWidth;
+    if (!availH || !availW) return;
+    // +1px は小数の丸め差で毎回わずかに縮むのを防ぐための遊び
+    const ratioH = availH / Math.max(availH, box.scrollHeight - 1);
+    const ratioW = availW / Math.max(availW, box.scrollWidth - 1);
+    const scale = Math.max(MIN_FIT_SCALE, Math.min(ratioH, ratioW, 1));
+    if (scale < 0.995) box.style.transform = `scale(${scale.toFixed(3)})`;
+  }
+
+  function autoFitAll() {
+    // count-up は文字列を書き換えるため、測る前に必ず完成形へ戻す。
+    // 「0%」を測って縮小率を決めると、数え終わった「42%」がはみ出す。
+    restoreCountUpText();
+    // スライドは display:none で待機しているため、そのままでは寸法が 0 になる。
+    // 1 枚ずつ「見えない状態で表示」して測り、元に戻す。
+    document.querySelectorAll(".slide").forEach((slide) => {
+      const prevDisplay = slide.style.display;
+      const prevVisibility = slide.style.visibility;
+      const prevOpacity = slide.style.opacity;
+      slide.style.display = "flex";
+      slide.style.visibility = "hidden";
+      slide.style.opacity = "1";
+      slide.querySelectorAll("[data-fit]").forEach(fitBox);
+      slide.style.display = prevDisplay;
+      slide.style.visibility = prevVisibility;
+      slide.style.opacity = prevOpacity;
+    });
+  }
+
+  tl.seek(0);
+
+  // フォントの読み込み完了を待ってから実測する。
+  // 待たずに測ると代替フォントの寸法で判定してしまい、
+  // 「たまに文字が小さすぎる動画ができる」という再現しにくい不具合になる。
+  // ただしフォント読込が詰まったときにレンダリングが永久に始まらないのは困るので、
+  // 3 秒で打ち切る。
+  const fontsReady = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
+  Promise.race([fontsReady, new Promise((resolve) => setTimeout(resolve, 3000))])
+    .catch(() => {})
+    .then(() => {
+      autoFitAll();
+      tl.seek(playRange ? playRange.from : 0);
+      // hyperframes はこのフラグを見てフレームの取得を始める。
+      // オートフィット後に立てることで、調整済みの絵だけが撮られる。
+      window.__playerReady = true;
+      window.__renderReady = true;
+      // 絵が整ってから流し始める。オートフィット前に再生すると、
+      // 文字の大きさが途中で変わる様子がそのまま見えてしまう。
+      if (isAutoplay) tl.play();
+    });
+
+  // 範囲の終わりで繰り返す・止める（#82）。
+  // 監視は ticker で行う。tl の onUpdate は 3D 背景の描画が繋いでいるので触らない。
+  // ticker はブラウザの表示に合わせて回るだけで、レンダリング（seek による
+  // コマ取り）には関与しないうえ、playRange はプレビュー表示でしか作られない。
+  if (playRange) {
+    gsap.ticker.add(() => {
+      if (tl.time() < playRange.to) return;
+      if (playRange.loop) {
+        tl.seek(playRange.from);
+      } else {
+        tl.pause();
+        tl.seek(playRange.to);
+      }
+    });
+  }
+
+  // Keep a playhead updater that triggers UI rendering
+  let activeSlide = null;
+
+  // --- 6. Viewport Responsive Scaling (16:9 ratio) ---
+  // #stage はダッシュボードの外（body 直下）にあるため、プレビュー時は
+  // 中央セル (.dashboard-preview) の矩形を測って、その上に重ねて表示する。
+  const dashboardPreview = document.querySelector(".dashboard-preview");
+
+  function layoutStage() {
+    if (!isPreviewMode || !dashboardPreview) return;
+
+    const targetWidth = parseInt(stage.dataset.width || "1920", 10);
+    const targetHeight = parseInt(stage.dataset.height || "1080", 10);
+    const rootStyle = document.documentElement.style;
+    // 狭い枠の縦積み表示（style.css の @media）で、映像のセルの高さを
+    // 動画の縦横比（高さ ÷ 幅）から決めるのに使う。測る前に入れておく
+    // （入れた直後の getBoundingClientRect は新しい高さで測られる）。
+    rootStyle.setProperty("--stage-hw", String(targetHeight / targetWidth));
+
+    const rect = dashboardPreview.getBoundingClientRect();
+    // .dashboard-preview の padding の分だけ内側に収める。
+    // 値を直書きすると、bare 表示のようにパディングを変えたときに
+    // ステージが枠からはみ出したり無駄に縮んだりする。
+    const pad = window.getComputedStyle(dashboardPreview);
+    const padX = parseFloat(pad.paddingLeft) + parseFloat(pad.paddingRight);
+    const padY = parseFloat(pad.paddingTop) + parseFloat(pad.paddingBottom);
+    const availableWidth = rect.width - padX;
+    const availableHeight = rect.height - padY;
+    if (availableWidth <= 0 || availableHeight <= 0) {
+      // 幅0・負の値では縮小しない（直前の倍率を維持する）
+      return;
+    }
+
+    const scale = Math.min(availableWidth / targetWidth, availableHeight / targetHeight);
+
+    rootStyle.setProperty("--stage-scale", scale);
+    rootStyle.setProperty("--stage-left", `${rect.left + (rect.width - targetWidth * scale) / 2}px`);
+    rootStyle.setProperty("--stage-top", `${rect.top + (rect.height - targetHeight * scale) / 2}px`);
+  }
+
+  window.addEventListener("resize", layoutStage);
+
+  // Run scaling on DOM load and immediately
+  window.addEventListener("load", layoutStage);
+  layoutStage();
+
+  // --- 7. Interactive Studio Controls (Only initialized in preview mode) ---
+  if (isPreviewMode) {
+    initPreviewDashboard();
+  }
+
+  function initPreviewDashboard() {
+    const playPauseBtn = document.getElementById("btn-play-pause");
+    const playPauseIcon = document.getElementById("icon-play-pause");
+    const timeDisplay = document.getElementById("time-display");
+    const timelineOuter = document.getElementById("timeline-outer");
+    const timelineFill = document.getElementById("timeline-fill");
+    const speedSelect = document.getElementById("speed-select");
+    const slideListContainer = document.getElementById("dashboard-slide-list");
+
+    // Populate Slide Navigation checklist
+    slides.forEach((slide) => {
+      const item = document.createElement("div");
+      item.className = "slide-item";
+      item.dataset.start = slide.start;
+      
+      const num = document.createElement("div");
+      num.className = "slide-item-num";
+      num.textContent = slide.index;
+      
+      const details = document.createElement("div");
+      details.className = "slide-item-title";
+      details.textContent = `${slide.category ? slide.category + ': ' : ''}${slide.title}`;
+
+      const time = document.createElement("div");
+      time.className = "slide-item-time";
+      time.textContent = formatTime(slide.start);
+
+      item.appendChild(num);
+      item.appendChild(details);
+      item.appendChild(time);
+
+      item.addEventListener("click", () => {
+        tl.time(slide.start);
+        updateUI();
+      });
+
+      slideListContainer.appendChild(item);
+    });
+
+    // Play/Pause Action
+    playPauseBtn.addEventListener("click", () => {
+      if (tl.paused()) {
+        tl.play();
+        playPauseIcon.className = "fa-solid fa-pause";
+      } else {
+        tl.pause();
+        playPauseIcon.className = "fa-solid fa-play";
+      }
+    });
+
+    // Speed Control Action
+    speedSelect.addEventListener("change", () => {
+      tl.timeScale(parseFloat(speedSelect.value));
+    });
+
+    // Scrubbing (Drag/Click Timeline)
+    let isDragging = false;
+
+    function scrub(e) {
+      const rect = timelineOuter.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const width = rect.width;
+      let pct = clickX / width;
+      pct = Math.max(0, Math.min(1, pct));
+      tl.progress(pct);
+      updateUI();
+    }
+
+    timelineOuter.addEventListener("mousedown", (e) => {
+      isDragging = true;
+      scrub(e);
+    });
+
+    document.addEventListener("mousemove", (e) => {
+      if (isDragging) scrub(e);
+    });
+
+    document.addEventListener("mouseup", () => {
+      isDragging = false;
+    });
+
+    // Synchronize Timeline ticks
+    gsap.ticker.add(() => {
+      if (!isDragging) {
+        updateUI();
+      }
+    });
+
+    function updateUI() {
+      const progress = tl.progress();
+      const time = tl.time();
+      
+      // Update scrubbing progress bar
+      timelineFill.style.width = (progress * 100) + "%";
+      
+      // Time text indicator
+      timeDisplay.textContent =
+        `${formatTime(time)} / ${durationEstimated ? "約 " : ""}${formatTime(totalDuration)}`;
+
+      // Synchronize Active Slide status
+      let currentSlide = null;
+      for (let i = 0; i < slides.length; i++) {
+        const slide = slides[i];
+        if (time >= slide.start && time < (slide.start + slide.duration)) {
+          currentSlide = slide;
+          break;
+        }
+      }
+
+      if (currentSlide && currentSlide !== activeSlide) {
+        activeSlide = currentSlide;
+        
+        // Update Sidebar List Items highlights
+        const items = slideListContainer.querySelectorAll(".slide-item");
+        items.forEach((item, idx) => {
+          if (idx === currentSlide.index - 1) {
+            item.classList.add("active");
+            item.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          } else {
+            item.classList.remove("active");
+          }
+        });
+        
+        // Re-render Track visualizer panel
+        renderTrackVisualizer(currentSlide);
+      }
+
+      // Update active state in HTML slides
+      slides.forEach((slide) => {
+        if (time >= slide.start && time < (slide.start + slide.duration)) {
+          slide.element.classList.add("active");
+        } else {
+          slide.element.classList.remove("active");
+        }
+      });
+
+      // Synchronize Playback icon state
+      if (tl.paused()) {
+        playPauseIcon.className = "fa-solid fa-play";
+      } else {
+        playPauseIcon.className = "fa-solid fa-pause";
+      }
+    }
+
+    // Right Sidebar visual track listing
+    const trackPanel = document.createElement("div");
+    trackPanel.className = "dashboard-panel";
+    
+    const panelHeader = document.createElement("div");
+    panelHeader.className = "panel-header";
+    panelHeader.innerHTML = `<h2><i class="fa-solid fa-sliders"></i> タイムラインレイヤー</h2>`;
+    
+    const trackTimeline = document.createElement("div");
+    trackTimeline.className = "track-timeline";
+    trackTimeline.id = "track-timeline-container";
+
+    const panelFooter = document.createElement("div");
+    panelFooter.className = "panel-footer";
+    panelFooter.innerHTML = `
+      <div style="font-size: 0.75rem; font-weight:600; margin-bottom:8px; color:var(--text-secondary);"><i class="fa-solid fa-terminal"></i> HyperFrames CLI レンダリング</div>
+      <div class="render-cmd-box">npx hyperframes render index.html --output output.mp4</div>
+    `;
+
+    trackPanel.appendChild(panelHeader);
+    trackPanel.appendChild(trackTimeline);
+    trackPanel.appendChild(panelFooter);
+    
+    // Add track panel to dashboard
+    document.getElementById("preview-dashboard").appendChild(trackPanel);
+
+    function renderTrackVisualizer(slide) {
+      trackTimeline.innerHTML = "";
+      
+      // Get all child elements under this slide with clip class
+      const childClips = slide.element.querySelectorAll(".clip");
+      
+      childClips.forEach((clip) => {
+        const cStart = parseFloat(clip.getAttribute("data-start"));
+        const cDur = parseFloat(clip.getAttribute("data-duration"));
+        
+        const row = document.createElement("div");
+        row.className = "track-row";
+        
+        // Element identifier name
+        let name = clip.tagName.toLowerCase();
+        if (clip.id) name += `#${clip.id}`;
+        if (clip.className) {
+          const firstClass = clip.className.split(" ").find(c => c !== "clip");
+          if (firstClass) name += `.${firstClass}`;
+        }
+        
+        const textSnippet = clip.textContent.trim().substring(0, 18);
+        const label = textSnippet ? `"${textSnippet}..."` : name;
+
+        // Calculate progress percentage inside the active slide duration
+        const relStart = cStart - slide.start;
+        const startPct = (relStart / slide.duration) * 100;
+        const durPct = (cDur / slide.duration) * 100;
+
+        row.innerHTML = `
+          <div class="track-name" title="${name}">${label}</div>
+          <div style="font-size: 0.6rem; color: var(--text-muted);">Start: ${cStart}s | Dur: ${cDur}s</div>
+          <div class="track-bar-container">
+            <div class="track-bar-fill" style="left: ${startPct}%; width: ${durPct}%;"></div>
+          </div>
+        `;
+        trackTimeline.appendChild(row);
+      });
+    }
+  }
+
+  // --- 8. Helper Formatting Functions ---
+  function formatTime(seconds) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }

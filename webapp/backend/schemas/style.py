@@ -1,0 +1,112 @@
+from pydantic import BaseModel, ConfigDict
+
+from services.design_tokens import DEFAULTS
+
+from core.clock import UtcDatetime
+
+
+class StyleTemplateBase(BaseModel):
+    name: str
+    is_system: bool = False
+    preview_image_path: str | None = None
+    base_css: str
+    color_primary: str = DEFAULTS["color_primary"]
+    color_secondary: str = DEFAULTS["color_secondary"]
+    color_accent: str = DEFAULTS["color_accent"]
+    color_bg: str = DEFAULTS["color_bg"]
+    color_text_primary: str = DEFAULTS["color_text_primary"]
+    font_heading: str = DEFAULTS["font_heading"]
+    font_body: str = DEFAULTS["font_body"]
+    # 配色だけでなくデザイン要素一式を運ぶ
+    background_motif: str = DEFAULTS["background_motif"]
+    decor_style: str = DEFAULTS["decor_style"]
+    type_scale: str = DEFAULTS["type_scale"]
+    transition: str = DEFAULTS["transition"]
+
+
+class StyleTemplateRead(StyleTemplateBase):
+    id: str
+    created_at: UtcDatetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VideoStyleRead(BaseModel):
+    id: str
+    video_id: str
+    template_id: str | None = None
+    color_primary: str | None = None
+    color_secondary: str | None = None
+    color_accent: str | None = None
+    color_bg: str | None = None
+    color_text_primary: str | None = None
+    font_heading: str | None = None
+    font_body: str | None = None
+    background_motif: str | None = None
+    decor_style: str | None = None
+    type_scale: str | None = None
+    transition: str | None = None
+    # FIX-22: AI に使わせるレイアウトの幅（minimal / standard / rich）
+    layout_breadth: str | None = None
+    motion_character: str | None = None
+    background_3d: str | None = None
+    narration_length: str | None = None
+    style_prompt: str | None = None
+    custom_css: str | None = None
+    default_speaker_id: str | None = None
+    default_speaker_b_id: str | None = None
+    bgm_path: str | None = None
+    bgm_volume: float = 0.3
+    bgm_prompt: str | None = None
+    narration_speed: float = 1.0
+    canvas_width: int = 1920
+    canvas_height: int = 1080
+
+    # ---- 以下は保存されない算出値 ----
+    # プレビュー用。派生色（文字副色・境界線・影など）の計算はサーバー側にしかない。
+    # 画面側で同じ計算を書くと必ず実際のレンダリング結果とずれるため、
+    # 算出済みの CSS をそのまま返して iframe に流し込ませる。
+    theme_css: str | None = None
+    stage_classes: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VideoStyleUpdate(BaseModel):
+    template_id: str | None = None
+    color_primary: str | None = None
+    color_secondary: str | None = None
+    color_accent: str | None = None
+    color_bg: str | None = None
+    color_text_primary: str | None = None
+    font_heading: str | None = None
+    font_body: str | None = None
+    background_motif: str | None = None
+    decor_style: str | None = None
+    type_scale: str | None = None
+    transition: str | None = None
+    # FIX-22: AI に使わせるレイアウトの幅（minimal / standard / rich）
+    layout_breadth: str | None = None
+    motion_character: str | None = None
+    background_3d: str | None = None
+    narration_length: str | None = None
+    style_prompt: str | None = None
+    custom_css: str | None = None
+    default_speaker_id: str | None = None
+    default_speaker_b_id: str | None = None
+    bgm_volume: float | None = None
+    bgm_prompt: str | None = None
+    narration_speed: float | None = None
+    canvas_width: int | None = None
+    canvas_height: int | None = None
+
+
+class ApplyPromptRequest(BaseModel):
+    prompt: str
+
+
+class GenerateBgmPromptResponse(BaseModel):
+    bgm_prompt: str
+    description: str | None = None
+    recommended_duration: str | None = None
+    style: VideoStyleRead
