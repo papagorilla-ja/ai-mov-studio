@@ -259,7 +259,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { useVideosStore } from '@/stores/videos'
 
 // アセット画像
-import cardThumbUrl from '@/assets/card_thumb_default.jpg'
+import cardThumbUrl from '@/assets/card_video_default.jpg'
 import emptyVideosArtUrl from '@/assets/empty_videos_art.jpg'
 import ReadingDictionaryTable from '@/components/ReadingDictionaryTable.vue'
 
