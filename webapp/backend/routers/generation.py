@@ -297,7 +297,9 @@ async def play_video(gen_id: str, db: AsyncSession = Depends(get_db)):
     if not path.exists():
         raise HTTPException(status_code=404, detail="動画ファイルが見つかりません")
 
-    # filename を指定しないことで Content-Disposition: inline 扱いとし、RangeRequests に対応させる
+    # filename を指定しないことで Content-Disposition: inline 扱いにする（ブラウザ内で再生させる）。
+    # Range への対応は FileResponse が行う（Starlette 0.39 以降）。ブラウザは Range で
+    # 動画の目次（moov）やシーク先を取りに来るので、応じないと長い動画は再生できない
     return FileResponse(
         path=str(path),
         media_type="video/mp4"

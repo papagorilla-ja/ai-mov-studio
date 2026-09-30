@@ -1106,7 +1106,7 @@
                   <td style="width: 80px;">
                     <img
                       v-if="h.thumbnail_path"
-                      :src="`/${h.thumbnail_path}`"
+                      :src="withBase(h.thumbnail_path)"
                       style="width: 72px; height: 40px; object-fit: cover; border-radius: 6px;"
                       :alt="`thumbnail-${h.id}`"
                     />

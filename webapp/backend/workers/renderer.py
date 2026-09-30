@@ -55,6 +55,11 @@ from workers.progress import (
 
 TEMPLATES_BLANK_DIR = Path("/app/templates/blank")
 
+# 完成動画を書き直す ffmpeg（連結・BGM ミックス）に付ける。動画の目次（moov）を先頭に置く。
+# 付けないと ffmpeg は moov を末尾に書き、ブラウザは末尾を読むまで再生を始められない。
+# hyperframes 自身は faststart で書き出すので、書き直す工程でも揃える
+FASTSTART_ARGS = ("-movflags", "+faststart")
+
 def get_wav_duration(file_path: Path) -> float:
     with wave.open(str(file_path), "rb") as f:
         frames = f.getnframes()
@@ -253,7 +258,7 @@ async def render_in_chunks(
         log(f"{len(part_paths)} 個のチャンクを連結しています...")
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", str(list_file), "-c", "copy", str(output_path),
+            "-i", str(list_file), "-c", "copy", *FASTSTART_ARGS, str(output_path),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -332,6 +337,7 @@ async def mix_bgm(output_path: Path, bgm_path: Path, volume: float, video_sec: f
             "-filter_complex", bgm_filter,
             "-map", "0:v", "-map", "[out]",
             "-c:v", "copy",
+            *FASTSTART_ARGS,
             str(mixed_path),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
