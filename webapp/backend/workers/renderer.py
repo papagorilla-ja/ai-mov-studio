@@ -65,6 +65,16 @@ def get_wav_duration(file_path: Path) -> float:
 RenderProgressFn = Callable[[float, str], Awaitable[None]]
 
 
+def _error_detail(resp: httpx.Response) -> str:
+    """レンダラーのエラー応答から理由を取り出す（FastAPI の {"detail": ...} 形式）。"""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return str(detail or resp.text or f"HTTP {resp.status_code}")
+
+
 async def request_render(
     video_dir: str,
     output_rel: str,
@@ -114,7 +124,11 @@ async def request_render(
         async with client.stream(
             "POST", f"{settings.renderer_base_url}/render/stream", json=payload
         ) as resp:
-            resp.raise_for_status()
+            if not resp.is_success:
+                # 始める前に断られた（フォルダに書き込めない・hyperframes が無い等）。
+                # raise_for_status では「400 Bad Request」としか出ず理由が分からないため、本文を読む
+                await resp.aread()
+                raise RuntimeError(f"レンダラーがレンダリングを受け付けませんでした: {_error_detail(resp)}")
             async for line in resp.aiter_lines():
                 if not line.strip():
                     continue

@@ -243,6 +243,7 @@ macOS と同じく、TTS・レンダラーはホストで、Web アプリは Doc
   HOST_SERVICES_BIND=172.17.0.1
   ```
   ファイアウォール（ufw など）が Docker のブリッジからの通信を止めている場合は、8100・8200 番を許可してください
+- **ファイルの所有者**: api コンテナは、`start.sh` が渡すホストのユーザーの UID/GID で動きます。root で動かすと、コンテナが作るフォルダ（`projects/` や `data/` の中）がホスト上でも root 所有になり、ホストで動くレンダラーが書き込めないためです。以前の版で作られた root 所有のファイルは、`start.sh` が起動時に自動で直します。`docker compose up` を直接使うとコンテナが root で動くので、必ず `start.sh` から起動してください
 - **書体**: ヒラギノ・游書体など macOS の書体はありません。それらを選んだスタイルは代わりの書体（Noto CJK など）で表示されます。同梱の BIZ UDPゴシックはそのまま使えます
 - **ローカル LLM**: Ollama・LM Studio などを使い、`.env` の `LOCAL_LLM_BASE_URL` で指定します
 
@@ -428,6 +429,17 @@ npm install -g hyperframes
 なお hyperframes の自己更新は無効化しています。レンダリング中に
 パッケージが入れ替わると `Missing manifest` で失敗するためです。
 更新は動画生成をしていないときに手動で行ってください。
+
+### レンダリングが "EACCES: permission denied, mkdtemp" で失敗する（Linux）
+
+レンダラーが動画フォルダに書き込めていません。api コンテナが root で動いていて、
+フォルダが root 所有になっているときに起きます。`bash stop.sh && bash start.sh` で
+起動し直すと、`start.sh` が所有者を直し、コンテナをホストのユーザーで動かします。
+直らないときは、次のコマンドで所有者を直してください。
+
+```bash
+sudo chown -R "$(id -u):$(id -g)" projects data engine/voice_samples
+```
 
 ---
 

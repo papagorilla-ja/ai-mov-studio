@@ -189,6 +189,49 @@ nohup "$RENDERER_PY" -m uvicorn renderer_server:app --host "$HOST_SERVICES_BIND"
 echo $! > "$SCRIPT_DIR/data/renderer_host.pid"
 cd "$SCRIPT_DIR"
 
+# ─── ファイルの所有者をそろえる ───────────────────────────
+# api コンテナはホストのユーザーと同じ UID/GID で動かす（docker-compose.yml の user）。
+# 以前は root で動かしていたため、Linux では projects/ などに root 所有のファイルが残っている。
+# そのままだと api が DB や動画フォルダに書き込めず、レンダラーも作業フォルダを作れない。
+# macOS の Docker Desktop はもともとホストのユーザーの所有で作るので、何もしない。
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+# rootless の Docker では、コンテナの root がホストのユーザーに当たる。
+# ホストの UID で動かすとホスト上では別の UID になってしまうので、root のまま動かす
+if docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless'; then
+  HOST_UID=0
+  HOST_GID=0
+fi
+export HOST_UID HOST_GID
+
+# api が書き込むフォルダ。ホスト側と、docker-compose.yml でマウントしたコンテナ側を同じ順に並べる
+OWNED_DIRS_HOST=("$SCRIPT_DIR/projects" "$SCRIPT_DIR/data" "$SCRIPT_DIR/engine/voice_samples")
+OWNED_DIRS_CONTAINER=(/app/projects /app/data /app/voice_samples)
+
+# 自分の所有でないファイルがあるときだけ、root のコンテナで所有者を直す（sudo は要らない）
+fix_ownership() {
+  # コンテナを root で動かすとき（start.sh を root で動かした・rootless の Docker）は直さない
+  # （直すと、かえってユーザーのファイルまで root 所有にしてしまう）
+  [ "$HOST_UID" = "0" ] && return 0
+
+  # 1 件見つかれば十分なので -quit で打ち切る。読めないフォルダのエラーは無視する
+  local found
+  found="$(find "${OWNED_DIRS_HOST[@]}" ! -uid "$HOST_UID" -print -quit 2>/dev/null || true)"
+  [ -z "$found" ] && return 0
+
+  log "自分の所有でないファイルがあるため、所有者を ${HOST_UID}:${HOST_GID} に直します（例: ${found#"$SCRIPT_DIR"/}）..."
+  # api のイメージを root で一時的に動かして直す。シンボリックリンク（分割レンダリングの
+  # assets など）はリンク先ではなくリンク自体を直す（-h）
+  if ! compose run --rm -T --no-deps --user 0:0 api \
+      find "${OWNED_DIRS_CONTAINER[@]}" ! -uid "$HOST_UID" \
+      -exec chown -h "${HOST_UID}:${HOST_GID}" {} +; then
+    err "所有者を直せませんでした。次のコマンドで直してから再実行してください:"
+    err "  sudo chown -R ${HOST_UID}:${HOST_GID} $(printf '%q ' "${OWNED_DIRS_HOST[@]}")"
+    exit 1
+  fi
+}
+fix_ownership
+
 # ─── 起動 ─────────────────────────────────────────────────
 log "Web アプリを起動します (docker compose up -d ${BUILD_FLAG})..."
 # 環境ごとの上書きを使っているかを示す（使っていることに気づかないまま設定を探さないように）
