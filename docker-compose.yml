@@ -45,6 +45,12 @@ services:
       context: ./webapp/backend
       dockerfile: Dockerfile
     container_name: heygen_api
+    # ホストのユーザーと同じ UID/GID で動かす。
+    # root のままだと、Linux では projects/ や data/ に作るファイルがホスト上でも root 所有になり、
+    # ホストで動くレンダラー（hyperframes）が作業フォルダや動画を書き込めずに失敗する（EACCES）。
+    # 値は start.sh が `id -u` / `id -g` で渡す。start.sh を通さずに起動したときは root で動く。
+    # macOS の Docker Desktop はファイルの所有者をホストのユーザーに読み替えるので、どの値でも動く。
+    user: "${HOST_UID:-0}:${HOST_GID:-0}"
     networks:
       - frontend
     extra_hosts:
@@ -71,6 +77,9 @@ services:
       - RENDERER_BASE_URL=${RENDERER_BASE_URL:-http://host.docker.internal:8200}
       # アプリ設定
       - DATABASE_URL=sqlite+aiosqlite:////app/data/app.db
+      # ホストの UID はコンテナの /etc/passwd に無いため、HOME が書き込めない / になる。
+      # ホームに設定やキャッシュを書くツール（fontconfig など）が失敗しないよう、誰でも書ける /tmp にする
+      - HOME=/tmp
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 15s

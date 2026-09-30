@@ -149,11 +149,37 @@ def parse_progress(line: str) -> tuple[int, str] | None:
     return (percent, m.group(2)) if 0 <= percent <= 100 else None
 
 
+def find_unwritable_dir(host_video_dir: Path, output_rel: str) -> Path | None:
+    """hyperframes が書き込むフォルダのうち、書き込めないものを返す（無ければ None）。
+
+    hyperframes は動画フォルダの中に作業フォルダ（work-XXXXXX）を作り、出力先に動画を書く。
+    api コンテナが root で動いていると、Linux ではこれらが root 所有になって書き込めず、
+    「EACCES: permission denied, mkdtemp」で失敗する。分かりにくいので先に確かめる。
+    出力先のフォルダがまだ無いときは hyperframes が作るので、動画フォルダだけを見ればよい。
+    """
+    output_dir = (host_video_dir / output_rel).parent
+    for d in (host_video_dir, output_dir):
+        if d.exists() and not os.access(d, os.W_OK):
+            return d
+    return None
+
+
 def _check_ready(req: RenderRequest) -> Path:
     """レンダリングを始められるかを確かめ、ホスト側の動画フォルダを返す。"""
     host_video_dir = Path(_to_host_path(req.video_dir))
     if not host_video_dir.exists():
         raise HTTPException(status_code=400, detail=f"ディレクトリが存在しません: {host_video_dir}")
+    unwritable = find_unwritable_dir(host_video_dir, req.output_path)
+    if unwritable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"レンダラーがフォルダに書き込めません: {unwritable}"
+                f"（所有者の UID: {unwritable.stat().st_uid}、レンダラーの UID: {os.getuid()}）。"
+                "api コンテナが root で動いていると起きます。"
+                "`bash stop.sh && bash start.sh` で起動し直すと、所有者が直ります。"
+            ),
+        )
     if not HYPERFRAMES:
         raise HTTPException(status_code=503, detail="hyperframes が見つかりません。環境変数やパス設定をご確認ください。")
     if not find_ffmpeg():
