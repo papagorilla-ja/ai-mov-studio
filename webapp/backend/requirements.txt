@@ -1,4 +1,6 @@
-fastapi==0.115.0
+# 0.115.14 は Starlette 0.46 系を使う。FileResponse / StaticFiles が Range に応じるのは
+# Starlette 0.39 から。これより古いと、moov が末尾にある長い動画をブラウザで再生できない
+fastapi==0.115.14
 uvicorn[standard]==0.30.6
 
 # DB / ORM
