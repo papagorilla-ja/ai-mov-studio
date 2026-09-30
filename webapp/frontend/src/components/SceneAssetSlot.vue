@@ -236,6 +236,7 @@
 <script setup>
 import { computed, ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { assetApi } from '@/api/asset'
+import { withBase } from '@/api/index.js'
 import { useUiStore } from '@/stores/ui'
 
 // 画像を内容として受け取らないレイアウトでは、素材は「添え物」として
@@ -354,8 +355,8 @@ function getAsset(slot) {
 
 function getPreviewUrl(asset) {
   if (!asset || !asset.url) return ''
-  const apiBase = (import.meta.env.VITE_API_BASE_URL || '').replace('/api/v1', '')
-  return `${apiBase}${asset.url}`
+  // サブパス運用時でも正しく参照できるように withBase で解決する
+  return withBase(asset.url)
 }
 
 function triggerFileInput(slot) {

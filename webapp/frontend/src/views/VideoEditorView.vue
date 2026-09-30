@@ -1195,7 +1195,7 @@
                       variant="outlined"
                       size="small"
                       class="ml-2"
-                      :href="`/api/v1/generations/${h.id}/subtitle.srt`"
+                      :href="withBase(`/api/v1/generations/${h.id}/subtitle.srt`)"
                       target="_blank"
                     >
                       字幕 SRT
@@ -1454,7 +1454,7 @@ import { useLayoutsStore } from '@/stores/layouts'
 import { layoutApi } from '@/api/layout'
 import { styleApi } from '@/api/style'
 import { useUiStore } from '@/stores/ui'
-import { api } from '@/api/index.js'
+import { api, withBase } from '@/api/index.js'
 import logoUrl from '@/assets/logo.jpg'
 import cardBasicInfoBgUrl from '@/assets/card_basic_info_bg.jpg'
 import btnGenerateSceneUrl from '@/assets/btn_generate_scene.jpg'
@@ -2419,7 +2419,8 @@ async function refreshCodePreview() {
   const { data } = await api.post(url)
   // preview_url にはプレビュー用フラグとキャッシュ回避のクエリが含まれているため、そのまま使う
   // scene_id を渡したときは今のシーンから表示される scene_preview_url を優先 (#84)
-  codePreviewUrl.value = data.scene_preview_url || data.preview_url
+  // サブパス運用時でも iframe が読み込めるよう withBase で解決する
+  codePreviewUrl.value = withBase(data.scene_preview_url || data.preview_url)
 }
 
 async function confirmDeleteHistory(h) {
@@ -2594,7 +2595,7 @@ async function handleSlidePreview() {
   slidePreviewLoading.value = true
   try {
     const { data } = await api.post(`/videos/${videoId}/preview`)
-    slidePreviewUrl.value = data.preview_url
+    slidePreviewUrl.value = withBase(data.preview_url)
     slidePreviewDialog.value = true
   } catch (e) {
     ui.notifyError('プレビューの生成に失敗しました: ' + e.message)
@@ -2613,7 +2614,7 @@ async function handleSceneModalPreview() {
     }
     const sceneId = selectedScene.value.id
     const { data } = await api.post(`/videos/${videoId}/preview?scene_id=${sceneId}`)
-    sceneModalPreviewUrl.value = data.scene_preview_url || data.preview_url
+    sceneModalPreviewUrl.value = withBase(data.scene_preview_url || data.preview_url)
     sceneModalPreviewDialog.value = true
   } catch (e) {
     ui.notifyError('プレビューの生成に失敗しました: ' + e.message)

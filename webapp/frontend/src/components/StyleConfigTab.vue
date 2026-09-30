@@ -521,7 +521,7 @@ import { useStyleStore } from '@/stores/style'
 import { useUiStore } from '@/stores/ui'
 import { useLayoutsStore } from '@/stores/layouts'
 import { styleApi } from '@/api/style.js'
-import { api } from '@/api/index.js'
+import { api, withBase } from '@/api/index.js'
 import { getStyleGroupIcon } from '@/assets/style-groups/index.js'
 
 const props = defineProps({
@@ -771,7 +771,8 @@ async function refreshPreview() {
   try {
     const { data } = await api.post(`/videos/${props.videoId}/preview`)
     // preview_url にはプレビュー用フラグとキャッシュ回避のクエリが含まれているため、そのまま使う
-    previewUrl.value = data.preview_url
+    // サブパス運用時でも iframe が読み込めるよう withBase で解決する
+    previewUrl.value = withBase(data.preview_url)
   } catch (e) {
     ui.notifyError('プレビューの更新に失敗しました: ' + e.message)
   } finally {

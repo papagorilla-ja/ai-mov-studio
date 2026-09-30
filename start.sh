@@ -99,19 +99,20 @@ check_venv() {
 
   if [ ! -x "$py" ]; then
     err "$label の venv が見つかりません: $py"
-    err "  次のコマンドで作成してください:"
+    err "  初回セットアップとして、次のコマンドで仮想環境を作成してください:"
     err "    cd \"$dir\""
-    err "    uv venv .venv-host --python 3.12"
-    err "    uv pip install --python .venv-host/bin/python -r requirements.txt"
+    err "    python3 -m venv .venv-host"
+    err "    .venv-host/bin/pip install -r requirements.txt"
+    err "  (※ uv をお使いの場合: uv venv .venv-host --python 3.12 && uv pip install --python .venv-host/bin/python -r requirements.txt)"
     exit 1
   fi
 
   # 依存の代表として 1 モジュールだけ import する（torch は読まないので 1 秒未満）
   if ! "$py" -c "import $module" 2>/dev/null; then
     err "$label の venv に $module がインストールされていません: $py"
-    err "  次のコマンドで導入してください:"
+    err "  次のコマンドで依存パッケージを導入してください:"
     err "    cd \"$dir\""
-    err "    uv pip install --python .venv-host/bin/python -r requirements.txt"
+    err "    .venv-host/bin/pip install -r requirements.txt"
     exit 1
   fi
 }

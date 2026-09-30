@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '@/api/index.js'
+import { api, getBasePrefix } from '@/api/index.js'
 import { useUiStore } from './ui'
 import { useScenesStore } from './scenes'
 import { useVideosStore } from './videos'
@@ -177,7 +177,9 @@ export const useGenerationStore = defineStore('generation', () => {
       ws.close()
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/videos/${videoId}/generation-progress`
+    // サブパス運用時（例: /ai-mov-studio）でも届くようベースプレフィックスを反映
+    const prefix = getBasePrefix()
+    const wsUrl = `${protocol}//${window.location.host}${prefix}/ws/videos/${videoId}/generation-progress`
     
     ws = new WebSocket(wsUrl)
     ws.onmessage = async (event) => {

@@ -9,6 +9,7 @@
 #
 # .env に書くもの:
 #   APP_HOST=movgen.example.com   … Traefik で受けるホスト名（必須）
+#   BASE_PATH=/ai-mov-studio      … サブパスで動かすときに指定（任意。通常運用時は /）
 #   APP_URL=https://movgen.example.com
 #                                 … start.sh が最後に表示する URL（任意）
 #   TRAEFIK_NETWORK=traefik       … Traefik がつながっている外部ネットワーク（既定: traefik）
@@ -24,6 +25,11 @@ services:
   webapp:
     # ホストの 3000 番は開けない（Traefik 経由でだけ受ける）
     ports: !reset []
+    build:
+      context: ./webapp/frontend
+      dockerfile: Dockerfile
+      args:
+        BASE_PATH: ${BASE_PATH:-/}
     networks:
       - frontend
       - traefik
@@ -31,8 +37,12 @@ services:
       - traefik.enable=true
       # webapp は 2 つのネットワークにつながるので、Traefik から届く方を指定する
       - traefik.docker.network=${TRAEFIK_NETWORK:-traefik}
-      - traefik.http.routers.ai-movgen.rule=Host(`${APP_HOST:?.env に APP_HOST を書いてください}`)
+      # サブドメイン運用の場合は Host(...) のみ、サブパス運用の場合は Host(...) && PathPrefix(...) にする
+      - traefik.http.routers.ai-movgen.rule=Host(`${APP_HOST:?.env に APP_HOST を書いてください}`) && PathPrefix(`${BASE_PATH:-/}`)
       - traefik.http.routers.ai-movgen.entrypoints=${TRAEFIK_ENTRYPOINT:-web}
+      # サブパス運用のときはプレフィックスを除去して Nginx に届ける（ルート運用の場合は影響なし）
+      - traefik.http.routers.ai-movgen.middlewares=ai-movgen-stripprefix
+      - traefik.http.middlewares.ai-movgen-stripprefix.stripprefix.prefixes=${BASE_PATH:-/}
       - traefik.http.services.ai-movgen.loadbalancer.server.port=80
       # HTTPS にする場合（Traefik 側に証明書の仕組みがあるとき）は次の 2 行を有効にする
       # - traefik.http.routers.ai-movgen.tls=true

@@ -471,7 +471,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useUiStore } from '@/stores/ui'
-import { api } from '@/api/index.js'
+import { api, withBase } from '@/api/index.js'
 
 // アセット画像
 import logoUrl from '@/assets/logo.jpg'
@@ -612,7 +612,8 @@ async function handleDelete() {
 }
 
 function handleExport(project) {
-  window.location.href = `/api/v1/projects/${project.id}/export`
+  // サブパス運用時でも届くよう withBase で解決する
+  window.location.href = withBase(`/api/v1/projects/${project.id}/export`)
 }
 
 async function handleImport() {

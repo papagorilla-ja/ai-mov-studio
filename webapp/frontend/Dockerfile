@@ -16,6 +16,10 @@ COPY package*.json ./
 # package-lock.json が存在する場合は npm ci、なければ npm install
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
+# サブパス運用用のベースパス（既定値: '/'）。docker compose override から注入可能
+ARG BASE_PATH=/
+ENV BASE_PATH=${BASE_PATH}
+
 # ソースコードをコピーしてビルド
 COPY . .
 RUN npm run build

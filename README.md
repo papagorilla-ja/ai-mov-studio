@@ -147,8 +147,15 @@ cd <クローンしたフォルダ>
 
 ### 2. ホスト側の依存を入れる
 
+**macOS の場合:**
 ```bash
 brew install ffmpeg node python@3.12
+npm install -g hyperframes
+```
+
+**Linux (Ubuntu / Debian) の場合:**
+```bash
+sudo apt update && sudo apt install -y ffmpeg python3-venv fonts-noto-cjk
 npm install -g hyperframes
 ```
 
@@ -243,6 +250,53 @@ macOS と同じく、TTS・レンダラーはホストで、Web アプリは Doc
 
 ## 起動と停止
 
+### 初回起動前の必須準備
+
+`start.sh` はホスト側の TTS（音声合成）サーバーと動画レンダラーサーバーも一括起動します。  
+**初回起動前**に、以下のホスト環境の準備を必ず完了させてください（[セットアップ](#セットアップ) 詳細参照）。
+
+#### 1. ホスト側依存ツール（ffmpeg / hyperframes）の導入
+動画のエンコードに `ffmpeg`、スライド描画に `hyperframes`（npm グローバル）が必要です。
+
+- **Linux (Ubuntu / Debian)**:
+  ```bash
+  sudo apt update && sudo apt install -y ffmpeg python3-venv fonts-noto-cjk
+  npm install -g hyperframes
+  ```
+- **macOS**:
+  ```bash
+  brew install ffmpeg node python@3.12
+  npm install -g hyperframes
+  ```
+
+#### 2. TTS サーバーの仮想環境作成
+```bash
+cd qwen3-tts
+python3 -m venv .venv-host
+.venv-host/bin/pip install -r requirements.txt
+cd ..
+```
+
+#### 3. レンダラーサーバーの仮想環境作成
+```bash
+cd mlx
+python3 -m venv .venv-host
+.venv-host/bin/pip install -r requirements.txt
+cd ..
+```
+
+#### 4. 話者の参照音声を配置
+声質クローンの基準となる音声（5〜15秒程度の明瞭な wav）を配置します。  
+※ 未配置の場合は起動時に標準のダミー音声が自動生成されますが、好みの声質を再現するには実音声を配置してください。
+```bash
+mkdir -p engine/voice_samples/default
+cp /path/to/voice.wav engine/voice_samples/default/reference.wav
+```
+
+---
+
+### コマンド一覧
+
 ```bash
 bash start.sh            # ビルドして一括起動
 bash start.sh --no-build # ビルドを省略して起動
@@ -262,7 +316,7 @@ bash stop.sh             # 停止
 | 8200 | レンダラー（ホスト） |
 | 11434 | Ollama（ホスト） |
 
-### 環境ごとの上書き（Traefik など）
+### 環境ごとの上書き（Traefik・サブパス運用など）
 
 `start.sh` と `stop.sh` は Compose の標準の読み方で `docker-compose.yml` を読みます。
 環境ごとに設定を変えたいときは、次のどちらかで上書きします。
@@ -270,14 +324,19 @@ bash stop.sh             # 停止
 - `docker-compose.override.yml` を置く（自動で重なります。git の管理外）
 - `.env` の `COMPOSE_FILE` で、使うファイルを並べる
 
-Traefik の後ろに置く見本として `docker-compose.traefik.example.yml` を同梱しています。
-ホストの 3000 番を開けずに、Traefik のネットワークから webapp へ届くようにします。
+#### Traefik の後ろに置く（サブパス運用・サブドメイン運用）
+ホストの 3000 番を開けずに、Traefik のリバースプロキシ経由でサービスを公開できます。  
+サブパス配下（例: `http://ct-studio.ofc.ct-net.co.jp/ai-mov-studio`）で公開する場合は、`.env` に以下を設定します：
 
 ```bash
-cp docker-compose.traefik.example.yml docker-compose.override.yml
-# .env に APP_HOST（Traefik で受けるホスト名）などを書く。詳しくは見本の先頭を参照
-bash start.sh
+APP_HOST=ct-studio.ofc.ct-net.co.jp
+BASE_PATH=/ai-mov-studio
+APP_URL=http://ct-studio.ofc.ct-net.co.jp/ai-mov-studio
+TRAEFIK_NETWORK=traefik
+TRAEFIK_ENTRYPOINT=web
 ```
+
+`docker-compose.override.yml` が置かれている場合、`start.sh` は自動的に override を重ね、フロントエンドをサブパス対応でビルドして起動します。
 
 > **注意**: このアプリにはログイン機能がありません。URL を知っている人は誰でも
 > 動画の生成・削除や設定の変更ができます。閉じたネットワークで使い、外に出す場合は

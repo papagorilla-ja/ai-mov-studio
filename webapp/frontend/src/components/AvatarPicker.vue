@@ -32,6 +32,8 @@
 </template>
 
 <script setup>
+import { withBase } from '@/api/index.js'
+
 const props = defineProps({
   modelValue: { type: String, default: null }
 })
@@ -42,7 +44,8 @@ function avatarFilename(n) {
 }
 
 function avatarUrl(n) {
-  return `/static/avatars/${avatarFilename(n)}`
+  // サブパス運用時でも正しく解決できるよう withBase を使用
+  return withBase(`/static/avatars/${avatarFilename(n)}`)
 }
 
 function select(n) {

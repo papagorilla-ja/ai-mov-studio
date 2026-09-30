@@ -134,7 +134,7 @@
                 <v-avatar size="40" class="mr-3">
                   <img
                     v-if="speaker.avatar_path"
-                    :src="speaker.avatar_path.startsWith('/') ? speaker.avatar_path : `/static/avatars/${speaker.avatar_path}`"
+                    :src="speakerAvatarUrl(speaker)"
                     :alt="speaker.name"
                     style="width: 100%; height: 100%; object-fit: cover;"
                   />
@@ -508,7 +508,7 @@
 
 <script setup>
 import { reactive, ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { api } from '@/api/index.js'
+import { api, withBase } from '@/api/index.js'
 import { speakerApi } from '@/api/speaker.js'
 import { useUiStore } from '@/stores/ui'
 import AvatarPicker from '@/components/AvatarPicker.vue'
@@ -517,6 +517,15 @@ import ReadingDictionaryTable from '@/components/ReadingDictionaryTable.vue'
 const ui = useUiStore()
 const saving = ref(false)
 const speakers = ref([])
+
+// 話者アバター画像のURLを解決（サブパス運用にも対応）
+const speakerAvatarUrl = (speaker) => {
+  if (!speaker?.avatar_path) return ''
+  const path = speaker.avatar_path.startsWith('/')
+    ? speaker.avatar_path
+    : `/static/avatars/${speaker.avatar_path}`
+  return withBase(path)
+}
 
 const settings = reactive({
   local_llm_base_url: 'http://host.docker.internal:11434/v1',

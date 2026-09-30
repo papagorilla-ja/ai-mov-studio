@@ -6,18 +6,54 @@
  */
 import axios from 'axios'
 
+/**
+ * アプリケーションのベースパスプレフィックスを取得する。
+ * 末尾のスラッシュは除外される（例: '/ai-mov-studio' または空文字 ''）。
+ * Vite の import.meta.env.BASE_URL（未設定時は '/'）を元に動的に算出する。
+ */
+export const getBasePrefix = () => {
+  const base = import.meta.env.BASE_URL || '/'
+  return base === '/' ? '' : base.replace(/\/$/, '')
+}
+
+/**
+ * 相対パスまたは絶対パスにベースパスプレフィックスを安全に付与する。
+ * 例: withBase('/static/avatar.jpg')
+ *     → サブパス運用時: '/ai-mov-studio/static/avatar.jpg'
+ *     → 通常運用時: '/static/avatar.jpg'
+ * 外部 URL（http/https 等）やデータURI、blob URL の場合はそのまま返す。
+ */
+export const withBase = (path) => {
+  if (!path) return ''
+  if (
+    path.startsWith('http://') ||
+    path.startsWith('https://') ||
+    path.startsWith('//') ||
+    path.startsWith('data:') ||
+    path.startsWith('blob:')
+  ) {
+    return path
+  }
+  const prefix = getBasePrefix()
+  const cleanPath = path.startsWith('/') ? path : `/${path}`
+  return `${prefix}${cleanPath}`
+}
+
 export const DEFAULT_TIMEOUT = 30_000
 export const LONG_TIMEOUT = 300_000
 
+// API クライアントのベース URL (/api/v1 または /ai-mov-studio/api/v1)
+const apiBaseUrl = `${getBasePrefix()}/api/v1`
+
 export const api = axios.create({
-  baseURL: '/api/v1',
+  baseURL: apiBaseUrl,
   headers: { 'Content-Type': 'application/json' },
   timeout: DEFAULT_TIMEOUT,
 })
 
 // LLM / TTS など長時間処理用（サーバ側 300s・nginx 300s に整合）
 export const longApi = axios.create({
-  baseURL: '/api/v1',
+  baseURL: apiBaseUrl,
   headers: { 'Content-Type': 'application/json' },
   timeout: LONG_TIMEOUT,
 })

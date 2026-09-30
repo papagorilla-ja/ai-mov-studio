@@ -257,6 +257,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useProjectsStore } from '@/stores/projects'
 import { useVideosStore } from '@/stores/videos'
+import { withBase } from '@/api/index.js'
 
 // アセット画像
 import cardThumbUrl from '@/assets/card_video_default.jpg'
@@ -306,7 +307,8 @@ async function handleDeleteVideo() {
 }
 
 function handleExportProject() {
-  window.location.href = `/api/v1/projects/${projectId}/export`
+  // サブパス運用時でも届くよう withBase で解決する
+  window.location.href = withBase(`/api/v1/projects/${projectId}/export`)
 }
 
 function videoStatusLabel(status) {
