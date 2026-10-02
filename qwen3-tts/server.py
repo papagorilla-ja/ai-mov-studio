@@ -50,8 +50,19 @@ from speech_check import check_speech
 # ─── 設定 ────────────────────────────────────────────────
 MODEL_ID = os.environ.get("QWEN3_TTS_MODEL_ID", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
 
+_dtype_override = os.environ.get("TTS_TORCH_DTYPE", "").lower()
 if torch.cuda.is_available():
-    DEVICE, TORCH_DTYPE = "cuda", torch.float16
+    DEVICE = "cuda"
+    if _dtype_override in ("bfloat16", "bf16"):
+        TORCH_DTYPE = torch.bfloat16
+    elif _dtype_override in ("float32", "fp32"):
+        TORCH_DTYPE = torch.float32
+    elif _dtype_override in ("float16", "fp16"):
+        TORCH_DTYPE = torch.float16
+    elif torch.cuda.is_bf16_supported():
+        TORCH_DTYPE = torch.bfloat16   # Ampere以降 (RTX 30xxなど) では bfloat16 で安定
+    else:
+        TORCH_DTYPE = torch.float32   # 古いGPUでは float16 のオーバーフローを防ぐため float32
 elif torch.backends.mps.is_available():
     DEVICE, TORCH_DTYPE = "mps", torch.float32   # Apple Silicon MPS (float32 で安定)
 else:
@@ -191,7 +202,12 @@ async def load_model():
                         temperature=GEN_TEMPERATURE)
         logger.info("ウォームアップ完了")
     except Exception as e:
-        logger.warning(f"ウォームアップ失敗 (無視します): {e}")
+        logger.error(f"ウォームアップ失敗: {e}", exc_info=True)
+        if DEVICE == "cuda":
+            raise RuntimeError(
+                f"CUDA環境でのウォームアップに失敗しました。CUDAコンテキスト破損を防ぐため起動を中止します: {e}"
+            ) from e
+        logger.warning(f"ウォームアップ失敗 (無視して続行します): {e}")
 
     # 音声の照合（#57）に使う whisper も先に読んでおく。読めなくても合成は続けられる。
     speech_check.preload()
@@ -594,6 +610,7 @@ def health():
         "status": "ok",
         "model": MODEL_ID,
         "device": DEVICE,
+        "dtype": str(TORCH_DTYPE).replace("torch.", ""),
         "model_loaded": tts_model is not None,
         "max_item_chars": MAX_ITEM_CHARS,
         # メモリ肥大の兆候を外から観測できるようにしておく（FIX-19）
