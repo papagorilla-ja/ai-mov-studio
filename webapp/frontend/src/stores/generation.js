@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api, getBasePrefix } from '@/api/index.js'
+import { api, withBase, getBasePrefix } from '@/api/index.js'
 import { useUiStore } from './ui'
 import { useScenesStore } from './scenes'
 import { useVideosStore } from './videos'
@@ -42,7 +42,8 @@ export const useGenerationStore = defineStore('generation', () => {
   async function fetchPreview(videoId) {
     try {
       const { data } = await api.get(`/videos/${videoId}/preview`)
-      previewUrl.value = data.available ? data.url : null
+      // サブパス運用時でも iframe が読み込めるよう withBase で解決する
+      previewUrl.value = data.available ? withBase(data.url) : null
     } catch (e) {
       previewUrl.value = null
     }

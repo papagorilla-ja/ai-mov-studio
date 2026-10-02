@@ -1077,7 +1077,7 @@
                 </div>
                 <div class="preview-frame">
                   <iframe
-                    :src="generationStore.previewUrl"
+                    :src="withBase(generationStore.previewUrl)"
                     title="仕上がりの下見"
                     loading="lazy"
                     referrerpolicy="no-referrer"

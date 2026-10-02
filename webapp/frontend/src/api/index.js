@@ -36,6 +36,9 @@ export const withBase = (path) => {
   }
   const prefix = getBasePrefix()
   const cleanPath = path.startsWith('/') ? path : `/${path}`
+  if (prefix && (cleanPath === prefix || cleanPath.startsWith(`${prefix}/`))) {
+    return cleanPath
+  }
   return `${prefix}${cleanPath}`
 }
 
