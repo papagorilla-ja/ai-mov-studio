@@ -269,13 +269,21 @@
             </div>
           </div>
 
-          <v-file-input
-            v-else
-            v-model="addForm.file"
-            label="参照音声 (WAV/MP3/M4A/FLAC)"
-            accept=".wav,.mp3,.m4a,.flac"
-            show-size
-          />
+          <template v-else>
+            <v-file-input
+              v-model="addForm.file"
+              label="参照音声 (WAV/MP3/M4A/FLAC)"
+              accept=".wav,.mp3,.m4a,.flac"
+              show-size
+            />
+            <v-checkbox
+              v-model="addForm.clean"
+              :label="CLEAN_UPLOAD_LABEL"
+              :hint="CLEAN_UPLOAD_HINT"
+              persistent-hint
+              density="compact"
+            />
+          </template>
 
           <div class="mt-4">
             <AvatarPicker v-model="addForm.avatar_path" />
@@ -304,6 +312,13 @@
             label="参照音声の変更 (任意)"
             accept=".wav,.mp3,.m4a,.flac"
             show-size
+          />
+          <v-checkbox
+            v-model="editForm.clean"
+            :label="CLEAN_UPLOAD_LABEL"
+            :hint="CLEAN_UPLOAD_HINT"
+            persistent-hint
+            density="compact"
           />
         </v-card-text>
         <v-card-actions class="pa-4 d-flex justify-end">
@@ -566,6 +581,8 @@ const addForm = reactive({
   source: 'recording',
   recordingId: null,
   file: null,
+  // アップロードした音声の雑音を除去して整えるか（#10）
+  clean: true,
   avatar_path: null,
 })
 
@@ -577,8 +594,13 @@ const editForm = reactive({
   language: 'ja',
   description: '',
   file: null,
+  clean: true,
   avatar_path: null,
 })
+
+// アップロード時の雑音除去チェックボックスの文言（追加・編集ダイアログで共用）
+const CLEAN_UPLOAD_LABEL = '雑音を除去して整える（推奨）'
+const CLEAN_UPLOAD_HINT = 'ノイズ除去と前後の無音・クリック音の除去、音量の調整を行います。スタジオで録った音声をそのまま使う場合は外してください。'
 
 // 音声収集セッション関連
 const sessionDialog = ref(false)
@@ -733,6 +755,7 @@ function openAddDialog(presetRecording = null) {
   addForm.source = presetRecording ? 'recording' : (recordings.value.length > 0 ? 'recording' : 'file')
   addForm.recordingId = presetRecording?.id || null
   addForm.file = null
+  addForm.clean = true
   addForm.avatar_path = null
   addDialog.value = true
 }
@@ -767,7 +790,7 @@ async function saveNewSpeaker() {
     if (useRecording) {
       await speakerApi.useRecording(newSpeaker.id, addForm.recordingId)
     } else {
-      await speakerApi.uploadReference(newSpeaker.id, addForm.file)
+      await speakerApi.uploadReference(newSpeaker.id, addForm.file, addForm.clean)
     }
 
     if (addForm.avatar_path) {
@@ -792,6 +815,7 @@ function openEditDialog(speaker) {
   editForm.description = speaker.description || ''
   editForm.avatar_path = speaker.avatar_path || null
   editForm.file = null
+  editForm.clean = true
   editDialog.value = true
 }
 
@@ -812,7 +836,7 @@ async function saveUpdatedSpeaker() {
 
     // 2. 音声ファイルが指定されていればアップロード
     if (editForm.file) {
-      await speakerApi.uploadReference(editForm.id, editForm.file)
+      await speakerApi.uploadReference(editForm.id, editForm.file, editForm.clean)
     }
 
     ui.notify('話者情報を更新しました')

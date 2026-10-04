@@ -3,13 +3,10 @@ import logging
 import os
 import shutil
 import uuid
-import math
 import asyncio
 from datetime import datetime
 from pathlib import Path
 import soundfile as sf
-import numpy as np
-from scipy.signal import resample_poly
 
 from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
 from fastapi.responses import FileResponse
@@ -27,7 +24,7 @@ from schemas.voice_recording import (
     VoiceRecordingRead,
     VoiceRecordingUpdate,
 )
-from services.audio_utils import build_reference_audio
+from services.audio_utils import build_reference_audio, convert_to_mono_16k, prepare_uploaded_reference
 from services.voice_corpus import MODE_LABELS, SUPPORTED_MODES, build_session_items
 
 logger = logging.getLogger("speakers")
@@ -92,18 +89,6 @@ def _recording_read(rec: VoiceRecording) -> VoiceRecordingRead:
     return obj
 
 
-def resample_to_16k(input_path: str, output_path: str):
-    data, sr = sf.read(input_path, always_2d=False)
-    # ステレオ → モノラル変換
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-    # リサンプリング
-    if sr != 16000:
-        g = math.gcd(16000, sr)
-        data = resample_poly(data, 16000 // g, sr // g)
-    data = np.clip(data, -1.0, 1.0)
-    sf.write(output_path, data.astype(np.float32), 16000, subtype="PCM_16")
-
 @router.get("", response_model=list[SpeakerRead])
 async def list_speakers(db: AsyncSession = Depends(get_db)):
     stmt = select(Speaker)
@@ -127,36 +112,46 @@ async def create_speaker(payload: SpeakerCreate, db: AsyncSession = Depends(get_
 async def upload_reference(
     speaker_id: str = Form(...),
     file: UploadFile = File(...),
+    # 雑音を除去して整えるか（#10）。プロが録った音声などをそのまま使いたいときだけ false にする
+    clean: bool = Form(True),
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(Speaker).where(Speaker.id == speaker_id)
     speaker = (await db.execute(stmt)).scalars().first()
     if not speaker:
         raise HTTPException(status_code=404, detail="話者が見つかりません")
-    
+
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in [".wav", ".mp3", ".m4a", ".flac"]:
         raise HTTPException(status_code=400, detail="対応フォーマットは WAV/MP3/M4A/FLAC です")
-    
+
     target_dir = f"/app/voice_samples/{speaker_id}"
     os.makedirs(target_dir, exist_ok=True)
-    
+
     tmp_path = f"{target_dir}/input.tmp"
+    # 処理が途中で失敗しても既存の参照音声を壊さないよう、別名に書いてから置き換える
+    new_ref_path = f"{target_dir}/reference.new.wav"
+    ref_path = f"{target_dir}/reference.wav"
     try:
         with open(tmp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
-        ref_path = f"{target_dir}/reference.wav"
-        await asyncio.to_thread(resample_to_16k, tmp_path, ref_path)
-        
+
+        await asyncio.to_thread(prepare_uploaded_reference, tmp_path, new_ref_path, clean)
+        os.replace(new_ref_path, ref_path)
+
         speaker.reference_audio_path = ref_path
         await db.flush()
         return speaker
+    except ValueError as e:
+        # 無音のファイルなど、利用者が直せる問題
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.error(f"参照音声の処理に失敗しました (speaker={speaker_id}): {e}")
         raise HTTPException(status_code=500, detail=f"音声ファイルの処理に失敗しました: {e}")
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        for path in (tmp_path, new_ref_path):
+            if os.path.exists(path):
+                os.remove(path)
 
 # ─── 音声収集セッション ────────────────────────────────────
 # 収録の流れ:
@@ -211,7 +206,7 @@ async def session_record(
     session_dir = _session_dir(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # ブラウザによって webm(Chrome) / mp4(Safari) など形式が変わるため、
+    # 画面側でノイズ除去済みの WAV が届く（#11）。形式は変わりうるため、
     # 拡張子は信用せず ffmpeg に判定させる（拡張子なしでも変換できる）
     input_path = session_dir / f"{sentence_index}.input"
     wav_path = session_dir / f"{sentence_index}.wav"
@@ -223,22 +218,14 @@ async def session_record(
         input_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="録音データが空です。もう一度録音してください。")
 
-    # 16kHz モノラル WAV へ変換
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-i", str(input_path), "-ar", "16000", "-ac", "1", str(wav_path),
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        # ffmpeg が失敗した場合は soundfile で直接読めるか試す
-        try:
-            await asyncio.to_thread(resample_to_16k, str(input_path), str(wav_path))
-        except Exception as inner_e:
-            detail = stderr.decode(errors="replace")[-400:]
-            logger.error(f"録音の変換に失敗しました (session={session_id} index={sentence_index}): {detail} / {inner_e}")
-            raise HTTPException(status_code=500, detail=f"音声ファイルの処理に失敗しました: {inner_e}")
-    input_path.unlink(missing_ok=True)
+    # 16kHz モノラル WAV へ変換（ノイズ除去は画面側で済んでいるので掛けない）
+    try:
+        await asyncio.to_thread(convert_to_mono_16k, str(input_path), str(wav_path))
+    except Exception as e:
+        logger.error(f"録音の変換に失敗しました (session={session_id} index={sentence_index}): {e}")
+        raise HTTPException(status_code=500, detail=f"音声ファイルの処理に失敗しました: {e}")
+    finally:
+        input_path.unlink(missing_ok=True)
 
     # 収録できた長さを返し、短すぎる場合は画面側で警告できるようにする
     try:

@@ -11,10 +11,12 @@ export const speakerApi = {
 
   delete: (id) => api.delete(`/speakers/${id}`),
 
-  uploadReference: (speakerId, file) => {
+  // clean: 雑音を除去して整えるか（#10）。false なら 16kHz モノラルへの変換だけを行う
+  uploadReference: (speakerId, file, clean = true) => {
     const form = new FormData()
     form.append('speaker_id', speakerId)
     form.append('file', file)
+    form.append('clean', clean ? 'true' : 'false')
     // multipart を明示しないと、axios の既定 Content-Type(application/json) により
     // FormData が JSON へ変換されてしまい、サーバ側で 422 になる
     return api.post('/speakers/upload-reference', form, {
