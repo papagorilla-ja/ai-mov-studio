@@ -2,14 +2,12 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 import uuid
-import math
 import asyncio
 from datetime import datetime
 from pathlib import Path
 import soundfile as sf
-import numpy as np
-from scipy.signal import resample_poly
 
 from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
 from fastapi.responses import FileResponse
@@ -27,8 +25,9 @@ from schemas.voice_recording import (
     VoiceRecordingRead,
     VoiceRecordingUpdate,
 )
-from services.audio_utils import build_reference_audio
-from services.voice_corpus import MODE_LABELS, SUPPORTED_MODES, build_session_items
+from services.audio_utils import build_reference_audio, convert_to_mono_16k, prepare_uploaded_reference
+from services.recording_package import PackageError, extract_package, save_upload
+from services.voice_corpus import MAX_SESSION_ITEMS, MODE_LABELS, SUPPORTED_MODES, build_session_items
 
 logger = logging.getLogger("speakers")
 
@@ -92,17 +91,38 @@ def _recording_read(rec: VoiceRecording) -> VoiceRecordingRead:
     return obj
 
 
-def resample_to_16k(input_path: str, output_path: str):
-    data, sr = sf.read(input_path, always_2d=False)
-    # ステレオ → モノラル変換
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-    # リサンプリング
-    if sr != 16000:
-        g = math.gcd(16000, sr)
-        data = resample_poly(data, 16000 // g, sr // g)
-    data = np.clip(data, -1.0, 1.0)
-    sf.write(output_path, data.astype(np.float32), 16000, subtype="PCM_16")
+async def _add_to_library(
+    db: AsyncSession, *, name: str, mode: str, take_paths: list[str], log_context: str
+) -> VoiceRecording:
+    """テイクから参照音声を作り、収録音声ライブラリに登録する。
+
+    収録セッションの完了（finalize）と、録音ツールの取り込み（#12）で共通の処理。
+    """
+    recording_id = str(uuid.uuid4())
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = RECORDINGS_DIR / f"{recording_id}.wav"
+
+    try:
+        # 無音トリム + 音量正規化 + テイク均等配分（既定 20 秒上限）
+        duration, used_takes = await asyncio.to_thread(build_reference_audio, take_paths, str(out_path))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"参照音声の作成に失敗しました ({log_context}): {e}")
+        raise HTTPException(status_code=500, detail=f"音声の結合に失敗しました: {e}")
+
+    rec = VoiceRecording(
+        id=recording_id,
+        name=name,
+        file_path=str(out_path),
+        mode=mode,
+        duration_sec=round(duration, 2),
+        take_count=used_takes,
+    )
+    db.add(rec)
+    await db.flush()
+    return rec
+
 
 @router.get("", response_model=list[SpeakerRead])
 async def list_speakers(db: AsyncSession = Depends(get_db)):
@@ -127,36 +147,46 @@ async def create_speaker(payload: SpeakerCreate, db: AsyncSession = Depends(get_
 async def upload_reference(
     speaker_id: str = Form(...),
     file: UploadFile = File(...),
+    # 雑音を除去して整えるか（#10）。プロが録った音声などをそのまま使いたいときだけ false にする
+    clean: bool = Form(True),
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(Speaker).where(Speaker.id == speaker_id)
     speaker = (await db.execute(stmt)).scalars().first()
     if not speaker:
         raise HTTPException(status_code=404, detail="話者が見つかりません")
-    
+
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in [".wav", ".mp3", ".m4a", ".flac"]:
         raise HTTPException(status_code=400, detail="対応フォーマットは WAV/MP3/M4A/FLAC です")
-    
+
     target_dir = f"/app/voice_samples/{speaker_id}"
     os.makedirs(target_dir, exist_ok=True)
-    
+
     tmp_path = f"{target_dir}/input.tmp"
+    # 処理が途中で失敗しても既存の参照音声を壊さないよう、別名に書いてから置き換える
+    new_ref_path = f"{target_dir}/reference.new.wav"
+    ref_path = f"{target_dir}/reference.wav"
     try:
         with open(tmp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
-        ref_path = f"{target_dir}/reference.wav"
-        await asyncio.to_thread(resample_to_16k, tmp_path, ref_path)
-        
+
+        await asyncio.to_thread(prepare_uploaded_reference, tmp_path, new_ref_path, clean)
+        os.replace(new_ref_path, ref_path)
+
         speaker.reference_audio_path = ref_path
         await db.flush()
         return speaker
+    except ValueError as e:
+        # 無音のファイルなど、利用者が直せる問題
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.error(f"参照音声の処理に失敗しました (speaker={speaker_id}): {e}")
         raise HTTPException(status_code=500, detail=f"音声ファイルの処理に失敗しました: {e}")
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        for path in (tmp_path, new_ref_path):
+            if os.path.exists(path):
+                os.remove(path)
 
 # ─── 音声収集セッション ────────────────────────────────────
 # 収録の流れ:
@@ -171,11 +201,25 @@ async def session_modes():
     return [{"value": m, "label": MODE_LABELS[m]} for m in SUPPORTED_MODES]
 
 
+@router.get("/collection-session/corpus")
+async def session_corpus():
+    """録音ツール（#12）に埋め込む提示項目を、全モードぶん返す。
+
+    録音ツールはサーバーと通信せずに動くため、ダウンロードの時点で項目を埋め込む。
+    各モードとも上限の本数ぶんを渡し、ツール側で先頭から必要な本数だけ使う。
+    build_session_items() は先頭から順に採用するので、画面上の収録と同じ文が同じ順で出る。
+    """
+    return {
+        "max_items": MAX_SESSION_ITEMS,
+        "items": {mode: build_session_items(mode, MAX_SESSION_ITEMS) for mode in SUPPORTED_MODES},
+    }
+
+
 @router.post("/collection-session/start")
 async def session_start(payload: SessionStartRequest):
     count = payload.item_count
-    if count < 1 or count > 10:
-        raise HTTPException(status_code=400, detail="収録本数は 1 以上 10 以下にしてください")
+    if count < 1 or count > MAX_SESSION_ITEMS:
+        raise HTTPException(status_code=400, detail=f"収録本数は 1 以上 {MAX_SESSION_ITEMS} 以下にしてください")
     if payload.mode not in SUPPORTED_MODES:
         raise HTTPException(status_code=400, detail=f"未対応の収録モードです: {payload.mode}")
 
@@ -211,7 +255,7 @@ async def session_record(
     session_dir = _session_dir(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # ブラウザによって webm(Chrome) / mp4(Safari) など形式が変わるため、
+    # 画面側でノイズ除去済みの WAV が届く（#11）。形式は変わりうるため、
     # 拡張子は信用せず ffmpeg に判定させる（拡張子なしでも変換できる）
     input_path = session_dir / f"{sentence_index}.input"
     wav_path = session_dir / f"{sentence_index}.wav"
@@ -223,22 +267,14 @@ async def session_record(
         input_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="録音データが空です。もう一度録音してください。")
 
-    # 16kHz モノラル WAV へ変換
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-i", str(input_path), "-ar", "16000", "-ac", "1", str(wav_path),
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        # ffmpeg が失敗した場合は soundfile で直接読めるか試す
-        try:
-            await asyncio.to_thread(resample_to_16k, str(input_path), str(wav_path))
-        except Exception as inner_e:
-            detail = stderr.decode(errors="replace")[-400:]
-            logger.error(f"録音の変換に失敗しました (session={session_id} index={sentence_index}): {detail} / {inner_e}")
-            raise HTTPException(status_code=500, detail=f"音声ファイルの処理に失敗しました: {inner_e}")
-    input_path.unlink(missing_ok=True)
+    # 16kHz モノラル WAV へ変換（ノイズ除去は画面側で済んでいるので掛けない）
+    try:
+        await asyncio.to_thread(convert_to_mono_16k, str(input_path), str(wav_path))
+    except Exception as e:
+        logger.error(f"録音の変換に失敗しました (session={session_id} index={sentence_index}): {e}")
+        raise HTTPException(status_code=500, detail=f"音声ファイルの処理に失敗しました: {e}")
+    finally:
+        input_path.unlink(missing_ok=True)
 
     # 収録できた長さを返し、短すぎる場合は画面側で警告できるようにする
     try:
@@ -278,29 +314,9 @@ async def session_finalize(
     if not take_paths:
         raise HTTPException(status_code=400, detail="録音ファイルが見つかりません。もう一度収録してください。")
 
-    recording_id = str(uuid.uuid4())
-    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RECORDINGS_DIR / f"{recording_id}.wav"
-
-    try:
-        # 無音トリム + 音量正規化 + テイク均等配分（既定 20 秒上限）
-        duration, used_takes = await asyncio.to_thread(build_reference_audio, take_paths, str(out_path))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"参照音声の作成に失敗しました (session={session_id}): {e}")
-        raise HTTPException(status_code=500, detail=f"音声の結合に失敗しました: {e}")
-
-    rec = VoiceRecording(
-        id=recording_id,
-        name=name,
-        file_path=str(out_path),
-        mode=session["mode"],
-        duration_sec=round(duration, 2),
-        take_count=used_takes,
+    rec = await _add_to_library(
+        db, name=name, mode=session["mode"], take_paths=take_paths, log_context=f"session={session_id}"
     )
-    db.add(rec)
-    await db.flush()
 
     shutil.rmtree(_session_dir(session_id), ignore_errors=True)
     _sessions.pop(session_id, None)
@@ -309,6 +325,37 @@ async def session_finalize(
 
 
 # ─── 収録音声ライブラリ ────────────────────────────────────
+
+@router.post("/recordings/import", response_model=VoiceRecordingRead, status_code=status.HTTP_201_CREATED)
+async def import_recording_package(
+    file: UploadFile = File(...),
+    # 空なら、録音ツールで付けた名前（manifest の name）を使う
+    name: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+):
+    """録音ツールで保存した収録パッケージ（.zip）を取り込み、収録音声ライブラリに登録する（#12）。
+
+    HTTP で運用していてブラウザのマイクを使えない環境向け。テイクはツール側で
+    ノイズ除去済みなので、ここでは収録セッションと同じ整形（無音トリム・音量正規化・
+    約 20 秒への均等配分）だけを行う。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        work_dir = Path(tmp)
+        package_path = work_dir / "package.zip"
+        try:
+            await asyncio.to_thread(save_upload, file.file, package_path)
+            package = await asyncio.to_thread(extract_package, package_path, work_dir, name)
+        except PackageError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"収録データの読み込みに失敗しました: {e}")
+            raise HTTPException(status_code=500, detail=f"収録データの読み込みに失敗しました: {e}")
+
+        rec = await _add_to_library(
+            db, name=package.name, mode=package.mode, take_paths=package.take_paths, log_context="import"
+        )
+    return _recording_read(rec)
+
 
 @router.get("/recordings", response_model=list[VoiceRecordingRead])
 async def list_recordings(db: AsyncSession = Depends(get_db)):

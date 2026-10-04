@@ -1,0 +1,193 @@
+/*
+ * ローカル録音ツール（#12）の見た目
+ * オフラインで開くため、外部のフォントやライブラリは使わない（OS の日本語フォントを使う）。
+ * 配色は AI Mov-Studio 本体の暗い画面に合わせている。
+ */
+:root {
+  --bg: #0f0f1a;
+  --surface: #181826;
+  --surface-2: #22223a;
+  --border: rgba(255, 255, 255, 0.12);
+  --text: #f1f5f9;
+  --text-muted: #94a3b8;
+  --primary: #6366f1;
+  --primary-soft: rgba(99, 102, 241, 0.18);
+  --record: #ef4444;
+  --warning: #f59e0b;
+  --warning-soft: rgba(245, 158, 11, 0.14);
+  --error-soft: rgba(239, 68, 68, 0.14);
+  --info-soft: rgba(6, 182, 212, 0.14);
+  --success-soft: rgba(34, 197, 94, 0.14);
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
+  line-height: 1.7;
+}
+
+/* ─── ページの枠 ─────────────────────────────── */
+.page { max-width: 760px; margin: 0 auto; padding: 32px 16px; }
+.page-header { margin-bottom: 20px; }
+.page-title { margin: 0; font-size: 24px; font-weight: 800; }
+.page-subtitle { margin: 4px 0 0; color: var(--text-muted); font-size: 14px; }
+.page-footer { margin-top: 16px; color: var(--text-muted); font-size: 12px; text-align: center; }
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 24px;
+}
+
+/* ─── 文字 ──────────────────────────────────── */
+.lead { margin: 0 0 16px; }
+.hint { margin: 4px 0 16px; color: var(--text-muted); font-size: 12px; }
+.center { text-align: center; justify-content: center; }
+.field-label { display: block; margin: 12px 0 6px; color: var(--text-muted); font-size: 12px; }
+.chip {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 400;
+}
+.mt { margin-top: 8px; }
+a { color: #a5b4fc; }
+
+/* ─── お知らせ ──────────────────────────────── */
+.alert { margin: 12px 0; padding: 12px 14px; border-radius: var(--radius); font-size: 13px; }
+.alert p { margin: 0 0 8px; }
+.alert-title { font-weight: 700; margin-bottom: 4px; }
+.alert-info { background: var(--info-soft); }
+.alert-warning { background: var(--warning-soft); }
+.alert-error { background: var(--error-soft); }
+.alert-success { background: var(--success-soft); }
+.steps { margin: 0; padding-left: 20px; }
+
+/* ─── 入力欄 ──────────────────────────────── */
+.select,
+.input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+}
+.select { max-width: 240px; }
+.radio-list { display: grid; gap: 8px; }
+.radio-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.radio-item.selected { border-color: var(--primary); background: var(--primary-soft); }
+.radio-item input { margin-top: 6px; }
+.radio-title { display: block; font-weight: 600; }
+.radio-description { display: block; color: var(--text-muted); font-size: 12px; }
+
+/* ─── ボタン ──────────────────────────────── */
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+.actions.between { justify-content: space-between; margin-top: 24px; }
+.actions .actions { margin: 0; }
+.btn {
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: var(--primary); color: #fff; font-weight: 600; }
+.btn-large { padding: 12px 40px; font-size: 16px; }
+.btn-outline { background: transparent; border-color: var(--border); }
+.btn-text { background: transparent; color: var(--text-muted); }
+.btn-tonal { background: var(--surface-2); }
+.btn-tonal-primary { background: var(--primary-soft); color: #c7d2fe; }
+.btn-record { background: var(--record); color: #fff; font-weight: 700; padding: 12px 36px; font-size: 16px; border-radius: 999px; }
+.btn-stop { background: #334155; color: #fff; font-weight: 700; padding: 12px 36px; font-size: 16px; border-radius: 999px; }
+
+/* ノイズ除去の強さ（弱・中・強・オフ） */
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.segmented button {
+  padding: 6px 14px;
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-left: 1px solid var(--border);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.segmented button:first-child { border-left: none; }
+.segmented button.active { background: var(--primary); color: #fff; }
+.segmented button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ─── 収録 ──────────────────────────────── */
+.progress-row { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+.progress-label { font-weight: 700; white-space: nowrap; }
+.progress-bar { flex: 1; height: 8px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--primary); transition: width 0.3s; }
+
+.prompt-card {
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 20px;
+  font-weight: 600;
+  text-align: center;
+}
+.prompt-chat { display: flex; gap: 12px; align-items: flex-start; }
+.chat-avatar { font-size: 28px; }
+.chat-bubble {
+  flex: 1;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 4px var(--radius) var(--radius) var(--radius);
+  font-size: 16px;
+}
+
+.control-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; margin-bottom: 12px; }
+.control { flex: 1; min-width: 220px; }
+
+.waveform-wrap { position: relative; max-width: 480px; margin: 0 auto; }
+.waveform { display: block; width: 100%; background: #000; border-radius: var(--radius); }
+.countdown-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 52px;
+  font-weight: 900;
+  text-shadow: 0 0 12px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+.status { margin: 8px 0; text-align: center; color: var(--text-muted); font-size: 13px; }
+.status-warning { color: var(--warning); font-weight: 700; }
+.status-recording { color: var(--record); font-weight: 700; }
+
+/* ─── 保存 ──────────────────────────────── */
+.take-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 13px; }
+.take-table th,
+.take-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.take-table th { color: var(--text-muted); font-weight: 400; }
+.take-table .take-prompt { white-space: normal; }
+.warning-mark { color: var(--warning); cursor: help; }
+.ok-mark { color: var(--text-muted); }

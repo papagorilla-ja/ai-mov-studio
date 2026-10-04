@@ -21,6 +21,9 @@ MODE_CHAT = "chat"
 MODE_EMOTION = "emotion"
 SUPPORTED_MODES = (MODE_SCRIPT, MODE_CHAT, MODE_EMOTION)
 
+# 1 回の収録で選べる本数の上限（画面の選択肢は 3 / 5 / 8 / 10）
+MAX_SESSION_ITEMS = 10
+
 MODE_LABELS = {
     MODE_SCRIPT: "台本読み上げ",
     MODE_CHAT: "チャット対話",
