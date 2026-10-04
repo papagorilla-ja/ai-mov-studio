@@ -14,7 +14,7 @@ import { COUNTDOWN_SEC, DEFAULT_NOISE_REDUCTION, MAX_RECORDING_SEC, TARGET_SAMPL
 import { describeMicrophoneError, isMicrophoneSupported, listMicrophones, startCapture } from '@/audio/capture.js'
 import { applyNoiseReduction, buildTake } from '@/audio/takeProcessing.js'
 import { drawIdleWaveform, startLiveWaveform } from '@/audio/waveform.js'
-import { encodeWav, encodeWavBlob } from '@/audio/wav.js'
+import { encodeWavBlob } from '@/audio/wav.js'
 
 // カウントダウン・経過秒数の表示を更新する間隔（ミリ秒）
 const TICK_MS = 100
@@ -33,6 +33,7 @@ export function useVoiceTakeRecorder({ canvasRef } = {}) {
   const noiseReduction = ref(DEFAULT_NOISE_REDUCTION)
   const take = shallowRef(null)          // takeProcessing.buildTake() の結果
   const processed = shallowRef(null)     // ノイズ除去後の音声（Float32Array）
+  let processedLevel = null              // processed を作ったときのノイズ除去の強さ
   const playing = ref(null)              // 再生中の音: 'processed' / 'original' / null
 
   const isCapturing = computed(() => phase.value === 'countdown' || phase.value === 'recording')
@@ -101,10 +102,14 @@ export function useVoiceTakeRecorder({ canvasRef } = {}) {
     if (!take.value) return
     stopPlayback()
     revokeUrl('processed')
-    processed.value = applyNoiseReduction(take.value, noiseReduction.value)
+    processedLevel = noiseReduction.value
+    processed.value = applyNoiseReduction(take.value, processedLevel)
   }
   // 録音後に強さを変えたら、元の音から処理し直す
-  watch(noiseReduction, reprocess)
+  // （restoreTake() で処理済みの強さに合わせたときは、処理し直さない）
+  watch(noiseReduction, (level) => {
+    if (level !== processedLevel) reprocess()
+  })
 
   // ─── 録音 ───────────────────────────────────────────
   async function refreshMicrophones() {
@@ -249,15 +254,32 @@ export function useVoiceTakeRecorder({ canvasRef } = {}) {
   // 以前にマイクを許可済みなら、最初の録音の前からマイクを選べるよう一覧を取っておく
   refreshMicrophones()
 
+  // ─── テイクの保存と復元（録音ツールで項目を行き来するため。#12） ───
+  /**
+   * 今のテイクを取り出す。録音済みでなければ null。
+   * @returns {{ take: object, processed: Float32Array, noiseReduction: string }|null}
+   */
+  function exportTake() {
+    if (!hasTake.value) return null
+    return { take: take.value, processed: processed.value, noiseReduction: processedLevel }
+  }
+
+  /** exportTake() で取り出したテイクを戻す。null なら待機状態にする（録音中は何もしない）。 */
+  function restoreTake(saved) {
+    if (isBusy.value) return
+    discard()
+    if (!saved) return
+    take.value = saved.take
+    processed.value = saved.processed
+    processedLevel = saved.noiseReduction
+    noiseReduction.value = saved.noiseReduction
+    phase.value = 'done'
+  }
+
   // ─── 書き出し ───────────────────────────────────────
   /** ノイズ除去後の音を WAV の Blob で返す（サーバーへのアップロード用）。 */
   function processedWavBlob() {
     return processed.value ? encodeWavBlob(processed.value, TARGET_SAMPLE_RATE) : null
-  }
-
-  /** ノイズ除去後の音を WAV のバイト列で返す（録音ツールの zip 用）。 */
-  function processedWavBytes() {
-    return processed.value ? encodeWav(processed.value, TARGET_SAMPLE_RATE) : null
   }
 
   return {
@@ -280,9 +302,10 @@ export function useVoiceTakeRecorder({ canvasRef } = {}) {
     stop,
     discard,
     reset,
+    exportTake,
+    restoreTake,
     play,
     stopPlayback,
     processedWavBlob,
-    processedWavBytes,
   }
 }

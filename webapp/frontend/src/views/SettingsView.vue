@@ -121,6 +121,39 @@
         </div>
       </v-card-title>
       <v-card-text>
+        <!-- ローカル録音ツール（#12）。HTTP などで画面上のマイクを使えない環境向け -->
+        <v-alert
+          :type="micSupported ? 'info' : 'warning'"
+          variant="tonal"
+          density="compact"
+          class="mb-4 text-body-2"
+        >
+          <div v-if="micSupported">
+            録音ツール（HTML ファイル）を使うと、ブラウザで開くだけでこの画面の外でも録音できます。
+            保存した収録データを取り込むと、収録音声ライブラリに登録されます。
+          </div>
+          <div v-else>
+            <strong>この接続（HTTP）では、画面上でマイクを使った録音ができません。</strong><br />
+            録音ツールをダウンロードして Google Chrome または Microsoft Edge で開き、
+            録音して保存した収録データを取り込んでください。
+          </div>
+          <div class="d-flex flex-wrap gap-2 mt-2">
+            <v-btn
+              size="small"
+              variant="flat"
+              color="primary"
+              prepend-icon="mdi-download"
+              :loading="downloadingTool"
+              @click="downloadRecorderTool"
+            >
+              録音ツールをダウンロード
+            </v-btn>
+            <v-btn size="small" variant="outlined" prepend-icon="mdi-upload" @click="openImportDialog">
+              収録データを取り込む
+            </v-btn>
+          </div>
+        </v-alert>
+
         <v-list class="bg-transparent pa-0">
           <v-list-item
             v-for="speaker in speakers"
@@ -193,7 +226,7 @@
       </v-card-title>
       <v-card-text>
         <div v-if="recordings.length === 0" class="text-caption text-medium-emphasis">
-          収録音声はまだありません。「音声収集セッションで作成」から収録すると、ここに保存され話者の参照音声として選べます。
+          収録音声はまだありません。「音声収集セッションで作成」で収録するか、録音ツールの収録データを取り込むと、ここに保存され話者の参照音声として選べます。
         </div>
         <v-list v-else class="bg-transparent pa-0">
           <v-list-item
@@ -206,7 +239,7 @@
               <div>
                 <div class="font-weight-bold text-subtitle-2">{{ rec.name }}</div>
                 <div class="text-caption text-medium-emphasis mt-1">
-                  {{ modeLabel(rec.mode) }} / {{ rec.duration_sec }}秒 / {{ rec.take_count }}テイク
+                  {{ recordingModeLabel(rec.mode) }} / {{ rec.duration_sec }}秒 / {{ rec.take_count }}テイク
                 </div>
               </div>
               <div class="d-flex align-center gap-1">
@@ -250,7 +283,7 @@
               item-value="value"
               label="収録音声を選択"
               :loading="loadingRecordings"
-              :no-data-text="'収録音声がありません。「音声収集セッションで作成」から収録してください。'"
+              :no-data-text="'収録音声がありません。「音声収集セッションで作成」で収録するか、収録データを取り込んでください。'"
               class="mb-2"
             />
             <div v-if="selectedRecording" class="d-flex align-center mb-2">
@@ -263,7 +296,7 @@
                 試聴する
               </v-btn>
               <span class="text-caption text-medium-emphasis ml-3">
-                {{ modeLabel(selectedRecording.mode) }} / {{ selectedRecording.duration_sec }}秒 /
+                {{ recordingModeLabel(selectedRecording.mode) }} / {{ selectedRecording.duration_sec }}秒 /
                 {{ selectedRecording.take_count }}テイク
               </span>
             </div>
@@ -328,6 +361,38 @@
       </v-card>
     </v-dialog>
 
+    <!-- 収録データの取り込みダイアログ（#12） -->
+    <v-dialog v-model="importDialog" max-width="520" :persistent="importing">
+      <v-card class="glass-card">
+        <v-card-title class="pa-4 text-h6">収録データを取り込む</v-card-title>
+        <v-card-text class="pa-4 pt-0">
+          <p class="text-body-2 mb-4">
+            録音ツールで保存した収録データ（.zip）を選んでください。
+            前後の無音の除去と音量の調整を行い、約20秒の参照音声に整えて収録音声ライブラリに登録します。
+          </p>
+          <v-file-input
+            v-model="importForm.file"
+            label="収録データ (.zip)"
+            accept=".zip,application/zip"
+            show-size
+            class="mb-2"
+          />
+          <v-text-field
+            v-model="importForm.name"
+            label="収録音声の名前（任意）"
+            hint="空欄なら、録音ツールで付けた名前を使います"
+            persistent-hint
+            :maxlength="RECORDING_NAME_MAX_LENGTH"
+            counter
+          />
+        </v-card-text>
+        <v-card-actions class="pa-4 d-flex justify-end">
+          <v-btn variant="text" :disabled="importing" @click="importDialog = false">キャンセル</v-btn>
+          <v-btn color="primary" :loading="importing" @click="importRecordingPackage">取り込んで話者作成へ</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <!-- 音声収集セッションダイアログ -->
     <v-dialog v-model="sessionDialog" max-width="700" persistent>
       <v-card class="glass-card">
@@ -347,33 +412,11 @@
 
             <div class="text-caption text-medium-emphasis mb-2">収録モード</div>
             <v-radio-group v-model="sessionConfig.mode" class="mb-2" density="comfortable">
-              <v-radio value="script">
+              <v-radio v-for="mode in RECORDING_MODES" :key="mode.value" :value="mode.value">
                 <template #label>
                   <div>
-                    <div class="font-weight-medium">台本読み上げ</div>
-                    <div class="text-caption text-medium-emphasis">
-                      表示された文をそのまま読み上げます。最も安定した参照音声が得られます。
-                    </div>
-                  </div>
-                </template>
-              </v-radio>
-              <v-radio value="chat">
-                <template #label>
-                  <div>
-                    <div class="font-weight-medium">チャット対話</div>
-                    <div class="text-caption text-medium-emphasis">
-                      画面の質問に声で自由に回答します。自然な抑揚が録れ、ナレーション向きの声質になります。
-                    </div>
-                  </div>
-                </template>
-              </v-radio>
-              <v-radio value="emotion">
-                <template #label>
-                  <div>
-                    <div class="font-weight-medium">感情・トーン指定</div>
-                    <div class="text-caption text-medium-emphasis">
-                      指定されたトーンで読み上げます。声の幅を収集でき、動画の雰囲気に合わせやすくなります。
-                    </div>
+                    <div class="font-weight-medium">{{ mode.label }}</div>
+                    <div class="text-caption text-medium-emphasis">{{ mode.description }}</div>
                   </div>
                 </template>
               </v-radio>
@@ -381,7 +424,7 @@
 
             <v-select
               v-model="sessionConfig.itemCount"
-              :items="[3, 5, 8, 10]"
+              :items="SESSION_ITEM_COUNTS"
               label="収録する本数"
               hint="1本あたり5〜20秒程度。参照音声は自動で約20秒に整えられます。"
               persistent-hint
@@ -598,6 +641,14 @@ import { speakerApi } from '@/api/speaker.js'
 import { COUNTDOWN_SEC, NOISE_REDUCTION_LEVELS } from '@/audio/config.js'
 import { isMicrophoneSupported } from '@/audio/capture.js'
 import { useVoiceTakeRecorder } from '@/composables/useVoiceTakeRecorder.js'
+import {
+  DEFAULT_SESSION_ITEM_COUNT,
+  RECORDING_MODES,
+  SESSION_ITEM_COUNTS,
+  recordingModeLabel,
+} from '@/constants/recordingModes.js'
+import { embedRecorderData } from '@/recorder-tool/embeddedData.js'
+import { saveBlobAsFile } from '@/utils/download.js'
 import { useUiStore } from '@/stores/ui'
 import AvatarPicker from '@/components/AvatarPicker.vue'
 import ReadingDictionaryTable from '@/components/ReadingDictionaryTable.vue'
@@ -682,8 +733,8 @@ const startingSession = ref(false)
 const submittingRecord = ref(false)
 const finalizing = ref(false)
 const sessionConfig = reactive({
-  mode: 'script',
-  itemCount: 5,
+  mode: RECORDING_MODES[0].value,
+  itemCount: DEFAULT_SESSION_ITEM_COUNT,
 })
 
 const sessionId = ref('')
@@ -698,19 +749,10 @@ const currentItem = computed(() => sessionItems.value[currentSentenceIndex.value
 const recordings = ref([])
 const loadingRecordings = ref(false)
 
-const MODE_LABELS = {
-  script: '台本読み上げ',
-  chat: 'チャット対話',
-  emotion: '感情・トーン指定',
-}
-function modeLabel(mode) {
-  return MODE_LABELS[mode] ?? mode
-}
-
 const recordingOptions = computed(() =>
   recordings.value.map(r => ({
     value: r.id,
-    title: `${r.name}（${modeLabel(r.mode)} / ${r.duration_sec}秒）`,
+    title: `${r.name}（${recordingModeLabel(r.mode)} / ${r.duration_sec}秒）`,
   }))
 )
 const selectedRecording = computed(() =>
@@ -725,9 +767,25 @@ const microphoneOptions = computed(() => [
   { deviceId: '', label: '既定のマイク' },
   ...recorder.microphones,
 ])
+// この画面でマイクを使えるか（HTTP では使えない。そのときは録音ツールを案内する）
+const micSupported = isMicrophoneSupported()
 // マイクを使えない接続（HTTP など）で録音しようとしたときの案内
 const MIC_UNAVAILABLE_MESSAGE =
-  'このブラウザ／URL ではマイクを使用できません。http://localhost:3000 でアクセスするか、HTTPS を利用してください。'
+  'このブラウザ／URL ではマイクを使用できません。「録音ツールをダウンロード」から録音ツールを使うか、http://localhost:3000 または HTTPS でアクセスしてください。'
+
+// ─── ローカル録音ツール（#12） ───
+// ビルド済みの録音ツール（vite.recorder.config.js が dist/tools/ に出力する）
+const RECORDER_TOOL_PATH = '/tools/voice-recorder.html'
+const RECORDER_TOOL_FILE_NAME = 'ai-mov-studio-voice-recorder.html'
+// 収録音声の名前の上限（サーバー側の services/recording_package.py と同じ）
+const RECORDING_NAME_MAX_LENGTH = 100
+const downloadingTool = ref(false)
+const importDialog = ref(false)
+const importing = ref(false)
+const importForm = reactive({
+  file: null,
+  name: '',
+})
 
 // 試聴用の Audio 要素（多重再生を避けるため1つを使い回す）
 let previewAudio = null
@@ -917,6 +975,58 @@ async function deleteSpeaker(id) {
     await loadSpeakers()
   } catch (e) {
     ui.notifyError('話者の削除に失敗しました: ' + e.message)
+  }
+}
+
+// ─── ローカル録音ツール（#12） ───
+// ツール本体に読み上げ文などを埋め込んで保存させる。
+// ツールはサーバーと通信せずに動くため、ダウンロードの時点で必要なデータをすべて渡す
+async function downloadRecorderTool() {
+  downloadingTool.value = true
+  try {
+    const [toolResponse, { data: corpus }] = await Promise.all([
+      fetch(withBase(RECORDER_TOOL_PATH), { cache: 'no-store' }),
+      speakerApi.sessionCorpus(),
+    ])
+    if (!toolResponse.ok) throw new Error(`録音ツールを取得できません (${toolResponse.status})`)
+    const html = embedRecorderData(await toolResponse.text(), {
+      ...corpus,
+      // ツールの保存画面から、取り込み先（この設定画面）へ戻れるようにする
+      app_url: `${window.location.origin}${withBase('/settings')}`,
+      generated_at: new Date().toISOString(),
+    })
+    saveBlobAsFile(new Blob([html], { type: 'text/html' }), RECORDER_TOOL_FILE_NAME)
+    ui.notify('録音ツールをダウンロードしました。Google Chrome または Microsoft Edge で開いてください。', 'success', 5000)
+  } catch (e) {
+    ui.notifyError('録音ツールのダウンロードに失敗しました: ' + e.message)
+  } finally {
+    downloadingTool.value = false
+  }
+}
+
+function openImportDialog() {
+  importForm.file = null
+  importForm.name = ''
+  importDialog.value = true
+}
+
+// 収録データを取り込み、続けて話者作成ダイアログへ遷移する（収録セッション完了時と同じ導線）
+async function importRecordingPackage() {
+  if (!importForm.file) {
+    ui.notifyError('収録データ（.zip）を選択してください')
+    return
+  }
+  importing.value = true
+  try {
+    const { data: rec } = await speakerApi.importRecording(importForm.file, importForm.name.trim())
+    ui.notify(`収録音声「${rec.name}」を取り込みました（${rec.duration_sec}秒）`)
+    importDialog.value = false
+    await loadRecordings()
+    openAddDialog(rec)
+  } catch (e) {
+    ui.notifyError('収録データの取り込みに失敗しました: ' + e.message)
+  } finally {
+    importing.value = false
   }
 }
 

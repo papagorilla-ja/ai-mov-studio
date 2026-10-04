@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<!--
+  ローカル録音ツール（#12）の入口。
+  vite.recorder.config.js でビルドすると、JS と CSS がすべて埋め込まれた
+  1 つの HTML（dist/tools/voice-recorder.html）になる。
+-->
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>話者の音声 録音ツール | AI Mov-Studio</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <!-- 読み上げ文などのデータ。設定画面からダウンロードするときに埋め込まれる（src/recorder-tool/embeddedData.js） -->
+    <script id="voice-recorder-data" type="application/json">__VOICE_RECORDER_DATA__</script>
+    <script type="module" src="/src/recorder-tool/main.js"></script>
+  </body>
+</html>
