@@ -81,7 +81,11 @@ async function createCaptureNode(audioContext, onChunk) {
       const node = new AudioWorkletNode(audioContext, WORKLET_NAME, {
         numberOfInputs: 1,
         numberOfOutputs: 1,
+        // ステレオで入力されるマイクでも、片方のチャンネルだけを拾わないようモノラルに混ぜる
+        // （ScriptProcessor は入力チャンネル数 1 を指定すると、仕様上同じ混ぜ方になる）
         channelCount: 1,
+        channelCountMode: 'explicit',
+        channelInterpretation: 'speakers',
       })
       node.port.onmessage = (e) => onChunk(e.data)
       return node
